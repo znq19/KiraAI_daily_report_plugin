@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>群聊日报</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+            background: #FFF8E7;
+            padding: 30px 20px;
+            display: flex;
+            justify-content: center;
+        }
+        .container {
+            max-width: 680px;
+            width: 100%;
+            background: #FFFCF5;
+            border-radius: 24px;
+            padding: 30px 28px 40px;
+            box-shadow: 0 8px 32px rgba(180, 140, 100, 0.15);
+            border: 1px solid #F5E6D3;
+            position: relative;
+            overflow: visible;
+        }
+        .container::before {
+            content: "✧";
+            position: absolute;
+            top: -10px;
+            right: 30px;
+            font-size: 28px;
+            color: #D4A574;
+            opacity: 0.5;
+        }
+        .container::after {
+            content: "✧";
+            position: absolute;
+            bottom: -10px;
+            left: 30px;
+            font-size: 28px;
+            color: #D4A574;
+            opacity: 0.5;
+        }
+
+        /* ===== 头部 ===== */
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 18px;
+            margin-bottom: 16px;
+            padding-bottom: 14px;
+            border-bottom: 2px dashed #F0DDCC;
+            position: relative;
+            overflow: visible;
+            padding-left: 120px;
+            min-height: 110px;
+        }
+        .header .group-avatar-stamp {
+            position: absolute;
+            top: -20px;
+            left: -20px;
+            width: 130px;
+            height: 130px;
+            border-radius: 50%;
+            overflow: hidden;
+            border: 6px solid #D4A574;
+            box-shadow: 0 8px 28px rgba(180, 140, 100, 0.4);
+            background: #F5E6D3;
+            z-index: 20;
+        }
+        .header .group-avatar-stamp img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+        .header .title-group {
+            flex: 1;
+            z-index: 5;
+            padding-top: 5px;
+        }
+        .header .title-group .main-title {
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            color: #6B4A3A;
+        }
+        .header .title-group .main-title .group-name {
+            font-weight: 800;
+            background: linear-gradient(135deg, #6B4A3A, #C49A6C);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .header .title-group .subtitle {
+            font-size: 14px;
+            color: #B8957A;
+            margin-top: 4px;
+            font-style: italic;
+            line-height: 1.4;
+        }
+        .header .date-badge {
+            background: #FFF0E0;
+            padding: 8px 14px;
+            border-radius: 20px;
+            font-size: 13px;
+            color: #6B4A3A;
+            text-align: center;
+            line-height: 1.4;
+            min-width: 80px;
+            border: 1px solid #F5E6D3;
+            font-weight: 500;
+            flex-shrink: 0;
+            z-index: 5;
+        }
+        .header .date-badge .weekday {
+            font-size: 11px;
+            color: #B8957A;
+        }
+
+        /* ===== 统计卡片 ===== */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+        .stats-card {
+            background: #FFF8F0;
+            border-radius: 16px;
+            padding: 16px 12px;
+            text-align: center;
+            border: 1px solid #F5E6D3;
+        }
+        .stats-card .number {
+            font-size: 28px;
+            font-weight: 700;
+            color: #C49A6C;
+            line-height: 1.2;
+        }
+        .stats-card .label {
+            font-size: 12px;
+            color: #B8957A;
+            margin-top: 4px;
+        }
+        .stats-card .sub-label {
+            font-size: 11px;
+            color: #C9B09C;
+            margin-top: 2px;
+        }
+
+        /* ===== 章节标题 ===== */
+        .section-title {
+            font-size: 17px;
+            font-weight: 600;
+            color: #6B4A3A;
+            margin: 24px 0 14px 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .section-title .emoji {
+            font-size: 20px;
+        }
+        .section-title .line {
+            flex: 1;
+            height: 1px;
+            background: linear-gradient(to right, #F0DDCC, transparent);
+        }
+
+        /* ===== 热门话题 ===== */
+        .topic-item {
+            background: #FFFCF5;
+            border-radius: 12px;
+            padding: 14px 16px;
+            margin-bottom: 10px;
+            border-left: 4px solid #D4A574;
+            box-shadow: 0 2px 8px rgba(180, 140, 100, 0.06);
+        }
+        .topic-item .topic-title {
+            font-weight: 600;
+            color: #5A3F32;
+            font-size: 15px;
+        }
+        .topic-item .topic-detail {
+            font-size: 13px;
+            color: #8A6A5A;
+            margin-top: 4px;
+            line-height: 1.5;
+        }
+        .topic-item .topic-roast {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px dashed #F5E6D3;
+            font-size: 13px;
+            color: #A08070;
+            font-style: italic;
+        }
+        .topic-item .topic-roast .avatar-sm {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            border: 2px solid #F0DDCC;
+            flex-shrink: 0;
+            overflow: hidden;
+            background: #F5E6D3;
+        }
+        .topic-item .topic-roast .avatar-sm img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .topic-item .topic-roast .roast-text {
+            flex: 1;
+        }
+
+        /* ===== 活跃用户 ===== */
+        .user-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px 16px;
+            background: #FFF8F0;
+            border-radius: 12px;
+            padding: 12px 16px;
+        }
+        .user-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            color: #5A3F32;
+        }
+        .user-item .avatar-square {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            flex-shrink: 0;
+            overflow: hidden;
+            background: #F5E6D3;
+            border: 2px solid #F0DDCC;
+        }
+        .user-item .avatar-square img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        /* 活跃用户名称 — 使用纯色（单色） */
+        .user-item .user-name-solid {
+            font-weight: 600;
+        }
+        .user-item .count {
+            color: #C49A6C;
+            font-weight: 600;
+            font-size: 13px;
+        }
+
+        /* ===== 金句 ===== */
+        .quote-box {
+            border-radius: 12px;
+            padding: 16px 20px;
+            border: 1px solid #F5E6D3;
+            box-shadow: 0 2px 8px rgba(180, 140, 100, 0.06);
+            margin-bottom: 10px;
+            background: #FFFCF5;
+            position: relative;
+            overflow: visible;
+            min-height: 60px;
+        }
+        .quote-box .quote-bg-avatar {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 120px;
+            opacity: 0.1;
+            background-size: cover;
+            background-position: center;
+            filter: blur(2px);
+            pointer-events: none;
+        }
+        .quote-box .quote-bg-avatar.left {
+            left: 0;
+            background-position: left center;
+        }
+        .quote-box .quote-bg-avatar.right {
+            right: 0;
+            background-position: right center;
+        }
+        .quote-box .quote-content {
+            position: relative;
+            z-index: 1;
+        }
+        .quote-box .quote-text {
+            font-size: 15px;
+            color: #4A3328;
+            line-height: 1.6;
+            font-style: italic;
+        }
+        .quote-box .quote-text::before {
+            content: "「";
+            color: #D4A574;
+        }
+        .quote-box .quote-text::after {
+            content: "」";
+            color: #D4A574;
+        }
+        .quote-box .quote-sender {
+            font-size: 13px;
+            color: #B8957A;
+            margin-top: 6px;
+            text-align: right;
+        }
+
+        /* 最佳金句高亮 */
+        .quote-box.best {
+            border: 2px solid #D4A574;
+            background: linear-gradient(135deg, #FFFCF5, #FFF5E8);
+            overflow: visible;
+        }
+        .quote-box.best .best-badge {
+            position: absolute;
+            top: -12px;
+            right: 12px;
+            background: #D4A574;
+            color: #FFF;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 16px;
+            border-radius: 12px;
+            letter-spacing: 0.5px;
+            z-index: 20;
+            box-shadow: 0 2px 10px rgba(180, 140, 100, 0.3);
+            white-space: nowrap;
+        }
+        .quote-box .best-reason {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px dashed #F0DDCC;
+            font-size: 13px;
+            color: #8A6A5A;
+        }
+        .quote-box .best-reason .avatar-md {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            border: 2px solid #D4A574;
+            flex-shrink: 0;
+            overflow: hidden;
+            background: #F5E6D3;
+        }
+        .quote-box .best-reason .avatar-md img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .quote-box .best-reason .reason-text {
+            font-style: italic;
+        }
+
+        /* ===== 锐评 ===== */
+        .sharp-comment {
+            margin-top: 24px;
+            padding: 0;
+            background: linear-gradient(135deg, #FFF8F0, #FFF0E0);
+            border-radius: 16px;
+            border: 1px solid #F0DDCC;
+            display: flex;
+            align-items: stretch;
+            overflow: hidden;
+        }
+        .sharp-comment .avatar-trapezoid {
+            flex: 0 0 120px;
+            min-height: 100px;
+            background: #F5E6D3;
+            clip-path: polygon(0 0, 100% 0, 80% 100%, 0% 100%);
+            overflow: hidden;
+            position: relative;
+            border-right: none;
+        }
+        .sharp-comment .avatar-trapezoid img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+        .sharp-comment .comment-body {
+            flex: 1;
+            padding: 18px 20px 18px 16px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+        .sharp-comment .comment-body .comment-label {
+            font-size: 13px;
+            color: #B8957A;
+            font-weight: 500;
+        }
+        .sharp-comment .comment-body .comment-content {
+            font-size: 15px;
+            color: #5A3F32;
+            margin-top: 4px;
+            line-height: 1.7;
+        }
+
+        /* ===== 空状态 ===== */
+        .empty-placeholder {
+            text-align: center;
+            color: #C9B09C;
+            font-size: 28px;
+            padding: 8px 0;
+            font-weight: 300;
+        }
+
+        /* ===== 页脚 ===== */
+        .footer {
+            margin-top: 28px;
+            text-align: center;
+            font-size: 12px;
+            color: #C9B09C;
+            border-top: 1px dashed #F0DDCC;
+            padding-top: 18px;
+            line-height: 1.8;
+        }
+        .footer .credit {
+            font-size: 11px;
+            color: #D4A574;
+            letter-spacing: 1px;
+            margin-top: 2px;
+        }
+
+        /* ===== 响应式 ===== */
+        @media (max-width: 480px) {
+            .container { padding: 20px 16px; }
+            .stats-grid { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+            .stats-card .number { font-size: 22px; }
+            .header .title-group .main-title { font-size: 18px; }
+            .sharp-comment .avatar-trapezoid { flex-basis: 80px; min-height: 70px; }
+            .quote-box .quote-bg-avatar { width: 80px; }
+            .header .group-avatar-stamp { width: 90px; height: 90px; top: -10px; left: -10px; }
+            .header { padding-left: 70px; }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <!-- 头部 -->
+    <div class="header">
+        <div class="group-avatar-stamp" style="border-color: {{ group_avatar_border_color }}; box-shadow: 0 8px 28px {{ group_avatar_border_color }}50;">
+            <img src="data:image/jpeg;base64,{{ group_avatar }}" alt="群头像">
+        </div>
+        <div class="title-group">
+            <div class="main-title" style="color: {{ title_color }}; font-family: {{ title_font }}, 'PingFang SC', 'Microsoft YaHei', sans-serif;">
+                <span class="group-name" style="background: {{ title_gradient }}; -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">{{ group_name }}</span> 群聊日报
+            </div>
+            <div class="subtitle">{{ analysis.header_comment | default('✨ 今天的群聊也充满欢乐 ✨') }}</div>
+        </div>
+        <div class="date-badge">
+            {{ generate_time.strftime('%Y年%m月%d日') }}
+            <div class="weekday">{{ generate_time.strftime('%A') }} / {{ generate_time.strftime('%a') }}</div>
+        </div>
+    </div>
+
+    <!-- 统计 -->
+    <div class="stats-grid">
+        <div class="stats-card">
+            <div class="number">{{ analysis.stats.total_messages }}{% if analysis.stats.max_messages %}/{{ analysis.stats.max_messages }}{% endif %}</div>
+            <div class="label">💬 消息总数</div>
+            {% if analysis.stats.start_time and analysis.stats.end_time %}
+            <div class="sub-label">{{ analysis.stats.start_time }} ~ {{ analysis.stats.end_time }}</div>
+            {% endif %}
+        </div>
+        <div class="stats-card">
+            <div class="number">{{ analysis.stats.participants }}</div>
+            <div class="label">👥 参与人数</div>
+        </div>
+        <div class="stats-card">
+            <div class="number">{{ analysis.stats.peak_hour }}</div>
+            <div class="label">⏰ 最活跃时段</div>
+        </div>
+    </div>
+
+    <!-- 热门话题 -->
+    <div class="section-title">
+        <span class="emoji">🔥</span> 热门话题
+        <span class="line"></span>
+    </div>
+    {% for topic in analysis.topics[:topic_max] %}
+    <div class="topic-item">
+        <div class="topic-title">{{ topic.title }}</div>
+        <div class="topic-detail">{{ topic.detail }}</div>
+        {% if topic.roast %}
+        <div class="topic-roast">
+            <div class="avatar-sm">
+                <img src="data:image/jpeg;base64,{{ bot_avatar }}" alt="AI">
+            </div>
+            <span class="roast-text">：{{ topic.roast }}</span>
+        </div>
+        {% endif %}
+    </div>
+    {% else %}
+    <div class="empty-placeholder">？</div>
+    {% endfor %}
+
+    <!-- 活跃用户 -->
+    <div class="section-title">
+        <span class="emoji">👤</span> 活跃用户
+        <span class="line"></span>
+    </div>
+    <div class="user-list">
+        {% for user in analysis.active_users[:active_users_max] %}
+        {% set style = user_styles.get(user.name, {}) %}
+        <div class="user-item">
+            <div class="avatar-square" style="border-color: {{ style.border_color or '#F0DDCC' }};">
+                <img src="data:image/jpeg;base64,{{ user_avatars.get(user.name, bot_avatar) }}" alt="{{ user.name }}">
+            </div>
+            <span class="user-name-solid" style="color: {{ style.name_color or '#6B4A3A' }};">{{ user.name }}</span>
+            <span class="count">{{ user.count }}条</span>
+        </div>
+        {% else %}
+        <span class="empty-placeholder" style="font-size:18px;">？</span>
+        {% endfor %}
+    </div>
+
+    <!-- 金句 -->
+    {% if quote_max > 0 and analysis.quotes %}
+    <div class="section-title">
+        <span class="emoji">💡</span> 今日金句
+        <span class="line"></span>
+    </div>
+
+    {# 合并金句列表，确保最佳金句在原位置 #}
+    {% set best_text = analysis.best_quote.text if analysis.best_quote else None %}
+    {% for quote in analysis.quotes[:quote_max] %}
+        {% set is_best = (best_text and quote.text == best_text) %}
+        {% set avatar_b64 = user_avatars.get(quote.sender, bot_avatar) %}
+        {% set bg_class = 'right' if is_best else 'left' %}
+        <div class="quote-box {% if is_best %}best{% endif %}">
+            <div class="quote-bg-avatar {{ bg_class }}" style="background-image: url('data:image/jpeg;base64,{{ avatar_b64 }}');"></div>
+            {% if is_best %}
+            <div class="best-badge">⭐ 最佳金句</div>
+            {% endif %}
+            <div class="quote-content">
+                <div class="quote-text">{{ quote.text }}</div>
+                <div class="quote-sender">—— {{ quote.sender }}</div>
+                {% if is_best and analysis.best_quote %}
+                <div class="best-reason">
+                    <div class="avatar-md">
+                        <img src="data:image/jpeg;base64,{{ bot_avatar }}" alt="AI">
+                    </div>
+                    <span class="reason-text">✨ {{ analysis.best_quote.reason }}</span>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    {% endfor %}
+    {% elif quote_max > 0 %}
+    <div class="empty-placeholder">？</div>
+    {% endif %}
+
+    <!-- 锐评 -->
+    {% if analysis.sharp_comment %}
+    <div class="sharp-comment">
+        <div class="avatar-trapezoid">
+            <img src="data:image/jpeg;base64,{{ bot_avatar }}" alt="AI">
+        </div>
+        <div class="comment-body">
+            <div class="comment-label">@{{ bot_nickname }} 锐评</div>
+            <div class="comment-content">{{ analysis.sharp_comment }}</div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- 页脚 -->
+    <div class="footer">
+        由 KiraAI · 群日报生成 · {{ generate_time.strftime('%Y-%m-%d %H:%M') }}
+        <div class="credit">provide by @znq19</div>
+    </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,276 @@
+{
+  "enabled_groups": {
+    "type": "list",
+    "name": "可使用日报的群组",
+    "default": [],
+    "hint": "留空表示所有群都启用，填入会话ID（如 qq:gm:123456）则仅这些群启用"
+  },
+  "auto_enabled_groups": {
+    "type": "list",
+    "name": "定时开启日报的群组",
+    "default": [],
+    "hint": "只有这些群会定时自动生成日报，留空表示与可使用群组一致。注意：若留空且 enabled_groups 也为空，则所有群都会定时跑"
+  },
+  "enable_command_trigger": {
+    "type": "switch",
+    "name": "启用命令触发",
+    "default": false,
+    "hint": "开启后，用户发送 /日报 等命令可触发日报生成"
+  },
+  "enable_natural_language_trigger": {
+    "type": "switch",
+    "name": "启用自然语言触发",
+    "default": true,
+    "hint": "开启后，用户可通过自然语言（如“生成日报”）让AI调用工具生成日报"
+  },
+  "command_prefixes": {
+    "type": "list",
+    "name": "触发命令列表",
+    "default": ["/日报", "/群日报"],
+    "hint": "仅当“启用命令触发”开启时生效，每行一个"
+  },
+  "analysis_days": {
+    "type": "integer",
+    "name": "分析天数",
+    "default": 1,
+    "minimum": 1,
+    "maximum": 7,
+    "hint": "日报分析最近几天的消息"
+  },
+  "max_messages_per_analysis": {
+    "type": "integer",
+    "name": "单次最大分析消息数",
+    "default": 500,
+    "minimum": 10,
+    "maximum": 5000,
+    "hint": "超过此数量将截断消息（按时间正序保留最新的），并在报告中显示上限。防止Token消耗过大"
+  },
+  "min_messages_threshold": {
+    "type": "integer",
+    "name": "最小消息数阈值",
+    "default": 10,
+    "minimum": 1,
+    "maximum": 100,
+    "hint": "消息少于该值时不生成日报（节省Token）"
+  },
+  "auto_analysis_time": {
+    "type": "string",
+    "name": "自动分析时间",
+    "default": "23:59",
+    "hint": "每天自动生成日报的时间，格式 HH:MM（24小时制）"
+  },
+  "enable_auto_analysis": {
+    "type": "switch",
+    "name": "启用自动日报",
+    "default": true,
+    "hint": "是否在每日指定时间自动生成日报"
+  },
+  "cooldown_hours": {
+    "type": "integer",
+    "name": "调用冷却时间（小时）",
+    "default": 4,
+    "minimum": 0,
+    "maximum": 24,
+    "hint": "同一群两次日报生成的最小间隔（0=无限制）"
+  },
+  "whitelist_users": {
+    "type": "list",
+    "name": "白名单用户",
+    "default": [],
+    "hint": "用户QQ号，每行一个。白名单用户不受冷却时间限制。"
+  },
+  "whitelist_exempt_cooldown": {
+    "type": "switch",
+    "name": "白名单用户豁免冷却",
+    "default": true,
+    "hint": "开启后白名单用户不受冷却限制；关闭后白名单用户也受冷却限制"
+  },
+  "enable_sharp_comment": {
+    "type": "switch",
+    "name": "启用AI锐评",
+    "default": true,
+    "hint": "日报末尾增加一段带有当前人设风格的锐评"
+  },
+  "inject_persona": {
+    "type": "switch",
+    "name": "注入人设风格",
+    "default": true,
+    "hint": "分析时使用当前人设作为系统提示词，让日报更有风味"
+  },
+  "persona_id": {
+    "type": "string",
+    "name": "指定人设ID",
+    "default": "default",
+    "hint": "留空则使用当前活跃人设，填入指定ID则固定使用该人设"
+  },
+  "topic_min": {
+    "type": "integer",
+    "name": "最少话题数",
+    "default": 1,
+    "minimum": 0,
+    "maximum": 5,
+    "hint": "日报中至少展示的话题数，不足则显示 ？"
+  },
+  "topic_max": {
+    "type": "integer",
+    "name": "最多话题数",
+    "default": 5,
+    "minimum": 1,
+    "maximum": 10,
+    "hint": "日报中最多展示的话题数"
+  },
+  "quote_max": {
+    "type": "integer",
+    "name": "金句数量",
+    "default": 3,
+    "minimum": 0,
+    "maximum": 10,
+    "hint": "日报中展示的金句数量（0=不展示）"
+  },
+  "active_users_max": {
+    "type": "integer",
+    "name": "活跃用户数量",
+    "default": 10,
+    "minimum": 1,
+    "maximum": 50,
+    "hint": "日报中展示的活跃用户数"
+  },
+  "max_concurrent_analysis": {
+    "type": "integer",
+    "name": "最大并发分析数",
+    "default": 3,
+    "minimum": 1,
+    "maximum": 10,
+    "hint": "同时分析的群数量上限"
+  },
+  "report_retention_days": {
+    "type": "integer",
+    "name": "报告保留天数",
+    "default": 7,
+    "minimum": 1,
+    "maximum": 30,
+    "hint": "超过此天数的报告将被清理"
+  },
+  "report_cleanup_count": {
+    "type": "integer",
+    "name": "每次清理报告数量",
+    "default": 7,
+    "minimum": 1,
+    "maximum": 50,
+    "hint": "每次清理时删除最旧的N个报告（不足N+1个则不清理）"
+  },
+  "output_format": {
+    "type": "enum",
+    "name": "输出格式",
+    "default": "image",
+    "options": ["image", "text"],
+    "hint": "image=生成图片，text=纯文本（省Token但不够美观）"
+  },
+  "verbose_log": {
+    "type": "switch",
+    "name": "详细日志",
+    "default": false,
+    "hint": "开启后输出更详细的调试日志"
+  },
+  "avatar_cache_expire_days": {
+    "type": "integer",
+    "name": "头像缓存过期天数",
+    "default": 3,
+    "minimum": 0,
+    "maximum": 30,
+    "hint": "0 表示永不过期。超过设定天数后重新下载头像"
+  },
+  "db_path": {
+    "type": "string",
+    "name": "消息数据库路径",
+    "default": "messages.db",
+    "hint": "相对插件数据目录的文件名"
+  },
+  "reports_dir": {
+    "type": "string",
+    "name": "报告存储目录",
+    "default": "reports",
+    "hint": "相对插件数据目录的目录名"
+  },
+  "avatar_cache_dir": {
+    "type": "string",
+    "name": "头像缓存目录",
+    "default": "avatars",
+    "hint": "相对插件数据目录的目录名"
+  },
+  "bot_nickname_override": {
+    "type": "string",
+    "name": "指定机器人昵称",
+    "default": "",
+    "hint": "若留空则自动尝试从适配器获取，若获取失败则显示'AI'。手动指定将覆盖自动获取"
+  },
+  "llm_model": {
+    "type": "model_select",
+    "name": "指定 LLM 模型",
+    "model_type": "llm",
+    "default": "",
+    "hint": "留空使用默认快速模型，可选择已注册的 LLM 提供商"
+  },
+  "exclude_senders": {
+    "type": "list",
+    "name": "屏蔽的发送者名称",
+    "default": ["system"],
+    "hint": "这些发送者的消息不会被收集，每行一个。例如 system、其他机器人账号等"
+  },
+  "prefer_system_browser": {
+    "type": "switch",
+    "name": "优先使用系统浏览器",
+    "default": true,
+    "hint": "开启后优先使用系统 Chrome/Edge 渲染；关闭则强制使用内置 Chromium（适合无图形界面的服务器）"
+  },
+  "render_timeout": {
+    "type": "integer",
+    "name": "渲染超时时间（秒）",
+    "default": 120,
+    "minimum": 10,
+    "maximum": 300,
+    "hint": "HTML 渲染为图片的超时时间，超时后任务失败"
+  },
+  "msg_too_few": {
+    "type": "string",
+    "name": "消息不足提示",
+    "default": "📊 群聊日报：今日消息数 ({count}) 不足 {threshold} 条，暂不生成日报",
+    "hint": "当消息数不足时发送的提示，支持 {count} 和 {threshold} 占位符"
+  },
+  "msg_cooldown": {
+    "type": "string",
+    "name": "冷却中提示",
+    "default": "⏳ 日报生成冷却中，剩余 {remaining:.1f} 小时",
+    "hint": "冷却期间发送的提示，支持 {remaining} 占位符（剩余小时数）"
+  },
+  "msg_not_enabled": {
+    "type": "string",
+    "name": "群未启用提示",
+    "default": "❌ 该群未启用日报功能",
+    "hint": "群未启用日报时发送的提示"
+  },
+  "msg_not_group": {
+    "type": "string",
+    "name": "非群聊提示",
+    "default": "❌ 请在群聊中使用此功能",
+    "hint": "在私聊中使用时报错提示"
+  },
+  "msg_processing": {
+    "type": "string",
+    "name": "处理中提示",
+    "default": "📊 正在生成日报，请稍候...",
+    "hint": "开始生成日报时的提示"
+  },
+  "msg_failed": {
+    "type": "string",
+    "name": "失败提示",
+    "default": "❌ 日报生成失败：{error}",
+    "hint": "分析失败时的提示，支持 {error} 占位符"
+  },
+  "msg_natural_disabled": {
+    "type": "string",
+    "name": "自然语言禁用提示",
+    "default": "ℹ️ 自然语言触发日报已禁用，请使用命令触发（如 /日报）",
+    "hint": "自然语言触发关闭时，工具调用的提示"
+  }
+}
