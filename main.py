@@ -905,7 +905,7 @@ class KiraDailyReport(BasePlugin):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f("[KiraDaily] 定时任务异常: {e}")
+                logger.error(f"[KiraDaily] 定时任务异常: {e}")
                 await asyncio.sleep(60)
 
     async def _run_auto_analysis(self):
