@@ -135,6 +135,42 @@
     "maximum": 50,
     "hint": "日报中展示的活跃用户数"
   },
+  "enable_incremental_mode": {
+    "type": "switch",
+    "name": "启用增量分析模式",
+    "default": false,
+    "hint": "开启后，定时任务将进行增量分析并存储，手动触发时合并所有增量结果。适合日均消息 > 500 条的群"
+  },
+  "incremental_group_list": {
+    "type": "list",
+    "name": "增量分析群列表",
+    "default": [],
+    "hint": "哪些群启用增量分析模式，留空则全部启用（需 enable_incremental_mode 开启）"
+  },
+  "incremental_interval_minutes": {
+    "type": "integer",
+    "name": "增量分析间隔（分钟）",
+    "default": 120,
+    "minimum": 15,
+    "maximum": 720,
+    "hint": "每隔多少分钟执行一次增量分析"
+  },
+  "incremental_min_messages": {
+    "type": "integer",
+    "name": "增量最小消息数",
+    "default": 10,
+    "minimum": 1,
+    "maximum": 100,
+    "hint": "少于该消息数则不触发增量分析（节省Token）"
+  },
+  "window_hours": {
+    "type": "integer",
+    "name": "滑动窗口大小（小时）",
+    "default": 24,
+    "minimum": 1,
+    "maximum": 168,
+    "hint": "生成完整日报时，合并最近多少小时的增量数据"
+  },
   "max_concurrent_analysis": {
     "type": "integer",
     "name": "最大并发分析数",
