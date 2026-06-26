@@ -248,7 +248,6 @@
             height: 100%;
             object-fit: cover;
         }
-        /* 活跃用户名称 — 使用纯色（单色） */
         .user-item .user-name-solid {
             font-weight: 600;
         }
@@ -507,7 +506,7 @@
     <div class="empty-placeholder">？</div>
     {% endfor %}
 
-    <!-- 活跃用户 -->
+    <!-- 活跃用户（只显示昵称，不带 #QQ号） -->
     <div class="section-title">
         <span class="emoji">👤</span> 活跃用户
         <span class="line"></span>
@@ -519,7 +518,7 @@
             <div class="avatar-square" style="border-color: {{ style.border_color or '#F0DDCC' }};">
                 <img src="data:image/jpeg;base64,{{ user_avatars.get(user.name, bot_avatar) }}" alt="{{ user.name }}">
             </div>
-            <span class="user-name-solid" style="color: {{ style.name_color or '#6B4A3A' }};">{{ user.name }}</span>
+            <span class="user-name-solid" style="color: {{ style.name_color or '#6B4A3A' }};">{{ style.display_name or user.name }}</span>
             <span class="count">{{ user.count }}条</span>
         </div>
         {% else %}
@@ -527,7 +526,7 @@
         {% endfor %}
     </div>
 
-    <!-- 金句 -->
+    <!-- 金句（只显示昵称，不带 #QQ号） -->
     {% if quote_max > 0 and analysis.quotes %}
     <div class="section-title">
         <span class="emoji">💡</span> 今日金句
@@ -540,6 +539,7 @@
         {% set is_best = (best_text and quote.text == best_text) %}
         {% set avatar_b64 = user_avatars.get(quote.sender, bot_avatar) %}
         {% set bg_class = 'right' if is_best else 'left' %}
+        {% set display_sender = user_styles.get(quote.sender, {}).get('display_name', quote.sender) %}
         <div class="quote-box {% if is_best %}best{% endif %}">
             <div class="quote-bg-avatar {{ bg_class }}" style="background-image: url('data:image/jpeg;base64,{{ avatar_b64 }}');"></div>
             {% if is_best %}
@@ -547,7 +547,7 @@
             {% endif %}
             <div class="quote-content">
                 <div class="quote-text">{{ quote.text }}</div>
-                <div class="quote-sender">—— {{ quote.sender }}</div>
+                <div class="quote-sender">—— {{ display_sender }}</div>
                 {% if is_best and analysis.best_quote %}
                 <div class="best-reason">
                     <div class="avatar-md">
