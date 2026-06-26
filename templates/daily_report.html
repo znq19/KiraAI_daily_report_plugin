@@ -5,42 +5,371 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>群聊日报</title>
     <style>
+        /* ============================================================
+           主题变量定义
+           ============================================================ */
+
+        /* ---- 暖黄手账（默认） ---- */
+        .theme-warm {
+            --bg-body: #FFF8E7;
+            --bg-container: #FFFCF5;
+            --border-container: #F5E6D3;
+            --shadow-color: rgba(180, 140, 100, 0.15);
+            --decoration-color: #D4A574;
+            --decoration-secondary: #E8D5C0;
+
+            --text-primary: #6B4A3A;
+            --text-secondary: #B8957A;
+            --text-muted: #C9B09C;
+            --text-dark: #5A3F32;
+            --text-medium: #8A6A5A;
+            --text-light: #A08070;
+
+            --bg-card: #FFF8F0;
+            --border-card: #F5E6D3;
+            --bg-highlight: #FFF0E0;
+            --bg-topic: #FFFCF5;
+            --border-topic: #D4A574;
+            --bg-userlist: #FFF8F0;
+            --bg-quote: #FFFCF5;
+            --bg-best: linear-gradient(135deg, #FFFCF5, #FFF5E8);
+            --bg-sharp: linear-gradient(135deg, #FFF8F0, #FFF0E0);
+            --border-sharp: #F0DDCC;
+            --bg-avatar: #F5E6D3;
+            --bg-divider: #F0DDCC;
+
+            --color-number: #C49A6C;
+            --color-border-avatar: #D4A574;
+            --color-name-default: #6B4A3A;
+            --color-count: #C49A6C;
+            --color-best-badge: #D4A574;
+            --color-credit: #D4A574;
+
+            --gradient-title: linear-gradient(135deg, #6B4A3A, #C49A6C);
+            --gradient-line: linear-gradient(to right, #F0DDCC, transparent);
+
+            --deco-shape: "✧";
+            --deco-shape-size: 28px;
+            --deco-opacity: 0.5;
+        }
+
+        /* ---- 樱花粉 ---- */
+        .theme-sakura {
+            --bg-body: #FFF5F6;
+            --bg-container: #FFF8F9;
+            --border-container: #FADADD;
+            --shadow-color: rgba(220, 120, 140, 0.12);
+            --decoration-color: #E890A0;
+            --decoration-secondary: #F5D0D8;
+
+            --text-primary: #7A4A55;
+            --text-secondary: #C88A95;
+            --text-muted: #D4A0AA;
+            --text-dark: #6A3A45;
+            --text-medium: #9A6A75;
+            --text-light: #B0808A;
+
+            --bg-card: #FFF5F6;
+            --border-card: #FADADD;
+            --bg-highlight: #FFEEF0;
+            --bg-topic: #FFF8F9;
+            --border-topic: #E890A0;
+            --bg-userlist: #FFF5F6;
+            --bg-quote: #FFF8F9;
+            --bg-best: linear-gradient(135deg, #FFF8F9, #FFEEF0);
+            --bg-sharp: linear-gradient(135deg, #FFF5F6, #FFEEF0);
+            --border-sharp: #FADADD;
+            --bg-avatar: #F5E0E4;
+            --bg-divider: #FADADD;
+
+            --color-number: #E08090;
+            --color-border-avatar: #E890A0;
+            --color-name-default: #7A4A55;
+            --color-count: #E08090;
+            --color-best-badge: #E890A0;
+            --color-credit: #E890A0;
+
+            --gradient-title: linear-gradient(135deg, #7A4A55, #E08090);
+            --gradient-line: linear-gradient(to right, #FADADD, transparent);
+
+            --deco-shape: "🌸";
+            --deco-shape-size: 24px;
+            --deco-opacity: 0.6;
+        }
+
+        /* ---- 幸运草绿 ---- */
+        .theme-clover {
+            --bg-body: #F2F8ED;
+            --bg-container: #F8FCF5;
+            --border-container: #C8E0B0;
+            --shadow-color: rgba(120, 170, 80, 0.12);
+            --decoration-color: #6AAF40;
+            --decoration-secondary: #D8EAC8;
+
+            --text-primary: #3A6A2A;
+            --text-secondary: #7AAA5A;
+            --text-muted: #9AC07A;
+            --text-dark: #2A5A1A;
+            --text-medium: #5A8A3A;
+            --text-light: #7AAA5A;
+
+            --bg-card: #F5FAF0;
+            --border-card: #C8E0B0;
+            --bg-highlight: #E8F5D8;
+            --bg-topic: #F8FCF5;
+            --border-topic: #6AAF40;
+            --bg-userlist: #F5FAF0;
+            --bg-quote: #F8FCF5;
+            --bg-best: linear-gradient(135deg, #F8FCF5, #E8F5D8);
+            --bg-sharp: linear-gradient(135deg, #F5FAF0, #E8F5D8);
+            --border-sharp: #C8E0B0;
+            --bg-avatar: #E0EED0;
+            --bg-divider: #C8E0B0;
+
+            --color-number: #5AA030;
+            --color-border-avatar: #6AAF40;
+            --color-name-default: #3A6A2A;
+            --color-count: #5AA030;
+            --color-best-badge: #6AAF40;
+            --color-credit: #6AAF40;
+
+            --gradient-title: linear-gradient(135deg, #3A6A2A, #5AA030);
+            --gradient-line: linear-gradient(to right, #C8E0B0, transparent);
+
+            --deco-shape: "🍀";
+            --deco-shape-size: 26px;
+            --deco-opacity: 0.5;
+        }
+
+        /* ---- 钻石黑（优化版：移除白边，深色阴影） ---- */
+        .theme-diamond {
+            --bg-body: #1A1A1E;
+            --bg-container: #222228;
+            --border-container: #222228;     /* ✅ 与卡片同色，消除刺眼白边 */
+            --shadow-color: rgba(0, 0, 0, 0.6); /* ✅ 纯黑柔阴影，融入深色背景 */
+            --decoration-color: #C9B07A;
+            --decoration-secondary: #3A3A42;
+
+            --text-primary: #E8E0D0;
+            --text-secondary: #A09888;
+            --text-muted: #7A7268;
+            --text-dark: #D0C8B8;
+            --text-medium: #B0A898;
+            --text-light: #908878;
+
+            --bg-card: #2A2A32;
+            --border-card: #3A3A42;
+            --bg-highlight: #2F2F38;
+            --bg-topic: #222228;
+            --border-topic: #C9B07A;
+            --bg-userlist: #2A2A32;
+            --bg-quote: #222228;
+            --bg-best: linear-gradient(135deg, #2A2A32, #33333D);
+            --bg-sharp: linear-gradient(135deg, #2A2A32, #2F2F38);
+            --border-sharp: #3A3A42;
+            --bg-avatar: #3A3A42;
+            --bg-divider: #3A3A42;
+
+            --color-number: #D4B87A;
+            --color-border-avatar: #C9B07A;
+            --color-name-default: #E8E0D0;
+            --color-count: #D4B87A;
+            --color-best-badge: #D4B87A;
+            --color-credit: #C9B07A;
+
+            --gradient-title: linear-gradient(135deg, #E8E0D0, #C9B07A);
+            --gradient-line: linear-gradient(to right, #3A3A42, transparent);
+
+            --deco-shape: "◆";
+            --deco-shape-size: 22px;
+            --deco-opacity: 0.4;
+        }
+
+        /* ---- 天空蓝 ---- */
+        .theme-sky {
+            --bg-body: #F0F6FA;
+            --bg-container: #F5FAFF;
+            --border-container: #C8DEE8;
+            --shadow-color: rgba(80, 150, 200, 0.10);
+            --decoration-color: #5A9EC0;
+            --decoration-secondary: #D0E8F0;
+
+            --text-primary: #2A5A7A;
+            --text-secondary: #6A9AB8;
+            --text-muted: #8AB8D0;
+            --text-dark: #1A4A6A;
+            --text-medium: #4A8AAA;
+            --text-light: #6A9AB8;
+
+            --bg-card: #F0F6FA;
+            --border-card: #C8DEE8;
+            --bg-highlight: #E0EEF5;
+            --bg-topic: #F5FAFF;
+            --border-topic: #5A9EC0;
+            --bg-userlist: #F0F6FA;
+            --bg-quote: #F5FAFF;
+            --bg-best: linear-gradient(135deg, #F5FAFF, #E0EEF5);
+            --bg-sharp: linear-gradient(135deg, #F0F6FA, #E0EEF5);
+            --border-sharp: #C8DEE8;
+            --bg-avatar: #D8E8F0;
+            --bg-divider: #C8DEE8;
+
+            --color-number: #4A8AB0;
+            --color-border-avatar: #5A9EC0;
+            --color-name-default: #2A5A7A;
+            --color-count: #4A8AB0;
+            --color-best-badge: #5A9EC0;
+            --color-credit: #5A9EC0;
+
+            --gradient-title: linear-gradient(135deg, #2A5A7A, #4A8AB0);
+            --gradient-line: linear-gradient(to right, #C8DEE8, transparent);
+
+            --deco-shape: "☁";
+            --deco-shape-size: 30px;
+            --deco-opacity: 0.35;
+        }
+
+        /* ============================================================
+           全局样式
+           ============================================================ */
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
+
         body {
             font-family: "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
-            background: #FFF8E7;
+            background: var(--bg-body);
             padding: 30px 20px;
             display: flex;
             justify-content: center;
+            transition: background 0.4s ease;
+            min-height: 100vh;
         }
+
         .container {
             max-width: 680px;
             width: 100%;
-            background: #FFFCF5;
+            background: var(--bg-container);
             border-radius: 24px;
             padding: 30px 28px 40px;
-            box-shadow: 0 8px 32px rgba(180, 140, 100, 0.15);
-            border: 1px solid #F5E6D3;
+            box-shadow: 0 8px 32px var(--shadow-color);
+            border: 1px solid var(--border-container);
             position: relative;
             overflow: visible;
+            transition: background 0.4s ease, border-color 0.4s ease, box-shadow 0.4s ease;
         }
+
+        /* ---- 主题装饰角标 ---- */
+        .container .corner-deco {
+            position: absolute;
+            font-size: var(--deco-shape-size);
+            color: var(--decoration-color);
+            opacity: var(--deco-opacity);
+            pointer-events: none;
+            transition: color 0.4s ease, opacity 0.4s ease;
+        }
+        .container .corner-deco.tl { top: -6px; left: 12px; }
+        .container .corner-deco.tr { top: -6px; right: 12px; }
+        .container .corner-deco.bl { bottom: -6px; left: 12px; }
+        .container .corner-deco.br { bottom: -6px; right: 12px; }
+
+        /* ---- 各主题特有装饰 ---- */
+        .theme-warm .corner-deco { content: "✧"; }
+
+        .theme-sakura .sakura-petal {
+            position: absolute;
+            font-size: 16px;
+            color: var(--decoration-color);
+            opacity: 0.25;
+            pointer-events: none;
+            animation: floatPetal 8s ease-in-out infinite;
+        }
+        .theme-sakura .sakura-petal:nth-child(1) { top: 5%; left: 5%; animation-delay: 0s; font-size: 18px; }
+        .theme-sakura .sakura-petal:nth-child(2) { top: 15%; right: 8%; animation-delay: 2s; font-size: 14px; }
+        .theme-sakura .sakura-petal:nth-child(3) { bottom: 20%; left: 10%; animation-delay: 4s; font-size: 16px; }
+        .theme-sakura .sakura-petal:nth-child(4) { bottom: 10%; right: 5%; animation-delay: 6s; font-size: 12px; }
+
+        @keyframes floatPetal {
+            0%, 100% { transform: translateY(0) rotate(0deg) scale(1); opacity: 0.25; }
+            25% { transform: translateY(-8px) rotate(10deg) scale(1.05); opacity: 0.4; }
+            50% { transform: translateY(4px) rotate(-5deg) scale(0.95); opacity: 0.2; }
+            75% { transform: translateY(-4px) rotate(8deg) scale(1.02); opacity: 0.35; }
+        }
+
+        .theme-clover .clover-border {
+            position: absolute;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: repeating-linear-gradient(
+                90deg,
+                var(--decoration-color) 0px,
+                var(--decoration-color) 8px,
+                transparent 8px,
+                transparent 16px
+            );
+            opacity: 0.25;
+            pointer-events: none;
+        }
+        .theme-clover .clover-border.top { top: 12px; }
+        .theme-clover .clover-border.bottom { bottom: 12px; }
+
+        .theme-diamond .sparkle {
+            position: absolute;
+            color: var(--decoration-color);
+            font-size: 10px;
+            opacity: 0.15;
+            pointer-events: none;
+            animation: sparkle 3s ease-in-out infinite;
+        }
+        .theme-diamond .sparkle:nth-child(1) { top: 8%; left: 8%; animation-delay: 0s; font-size: 12px; }
+        .theme-diamond .sparkle:nth-child(2) { top: 20%; right: 15%; animation-delay: 1s; font-size: 8px; }
+        .theme-diamond .sparkle:nth-child(3) { bottom: 25%; left: 20%; animation-delay: 2s; font-size: 10px; }
+        .theme-diamond .sparkle:nth-child(4) { bottom: 15%; right: 10%; animation-delay: 0.5s; font-size: 14px; }
+        .theme-diamond .sparkle:nth-child(5) { top: 50%; left: 3%; animation-delay: 1.5s; font-size: 8px; }
+        .theme-diamond .sparkle:nth-child(6) { top: 45%; right: 3%; animation-delay: 2.5s; font-size: 10px; }
+
+        @keyframes sparkle {
+            0%, 100% { opacity: 0.1; transform: scale(0.8); }
+            50% { opacity: 0.4; transform: scale(1.2); }
+        }
+
+        .theme-sky .cloud-deco {
+            position: absolute;
+            font-size: 32px;
+            color: var(--decoration-color);
+            opacity: 0.12;
+            pointer-events: none;
+            animation: driftCloud 12s ease-in-out infinite;
+        }
+        .theme-sky .cloud-deco:nth-child(1) { top: 5%; left: 0%; animation-delay: 0s; font-size: 40px; }
+        .theme-sky .cloud-deco:nth-child(2) { bottom: 8%; right: 0%; animation-delay: 4s; font-size: 30px; }
+        .theme-sky .cloud-deco:nth-child(3) { top: 40%; left: -2%; animation-delay: 8s; font-size: 24px; }
+
+        @keyframes driftCloud {
+            0%, 100% { transform: translateX(0) scale(1); opacity: 0.12; }
+            50% { transform: translateX(20px) scale(1.05); opacity: 0.2; }
+        }
+
+        /* ---- 容器装饰 ---- */
         .container::before {
-            content: "✧";
+            content: var(--deco-shape);
             position: absolute;
             top: -10px;
             right: 30px;
-            font-size: 28px;
-            color: #D4A574;
-            opacity: 0.5;
+            font-size: var(--deco-shape-size);
+            color: var(--decoration-color);
+            opacity: var(--deco-opacity);
+            transition: color 0.4s ease, opacity 0.4s ease;
         }
         .container::after {
-            content: "✧";
+            content: var(--deco-shape);
             position: absolute;
             bottom: -10px;
             left: 30px;
-            font-size: 28px;
-            color: #D4A574;
-            opacity: 0.5;
+            font-size: var(--deco-shape-size);
+            color: var(--decoration-color);
+            opacity: var(--deco-opacity);
+            transition: color 0.4s ease, opacity 0.4s ease;
         }
 
         /* ===== 头部 ===== */
@@ -50,12 +379,14 @@
             gap: 18px;
             margin-bottom: 16px;
             padding-bottom: 14px;
-            border-bottom: 2px dashed #F0DDCC;
+            border-bottom: 2px dashed var(--bg-divider);
             position: relative;
             overflow: visible;
             padding-left: 120px;
             min-height: 110px;
+            transition: border-color 0.4s ease;
         }
+
         .header .group-avatar-stamp {
             position: absolute;
             top: -20px;
@@ -64,10 +395,11 @@
             height: 130px;
             border-radius: 50%;
             overflow: hidden;
-            border: 6px solid #D4A574;
-            box-shadow: 0 8px 28px rgba(180, 140, 100, 0.4);
-            background: #F5E6D3;
+            border: 6px solid var(--color-border-avatar);
+            box-shadow: 0 8px 28px var(--shadow-color);
+            background: var(--bg-avatar);
             z-index: 20;
+            transition: border-color 0.4s ease, box-shadow 0.4s ease;
         }
         .header .group-avatar-stamp img {
             width: 100%;
@@ -75,6 +407,7 @@
             object-fit: cover;
             display: block;
         }
+
         .header .title-group {
             flex: 1;
             z-index: 5;
@@ -84,39 +417,45 @@
             font-size: 22px;
             font-weight: 700;
             letter-spacing: 1px;
-            color: #6B4A3A;
+            color: var(--text-primary);
+            transition: color 0.4s ease;
         }
         .header .title-group .main-title .group-name {
             font-weight: 800;
-            background: linear-gradient(135deg, #6B4A3A, #C49A6C);
+            background: var(--gradient-title);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
+            transition: background 0.4s ease;
         }
         .header .title-group .subtitle {
             font-size: 14px;
-            color: #B8957A;
+            color: var(--text-secondary);
             margin-top: 4px;
             font-style: italic;
             line-height: 1.4;
+            transition: color 0.4s ease;
         }
+
         .header .date-badge {
-            background: #FFF0E0;
+            background: var(--bg-highlight);
             padding: 8px 14px;
             border-radius: 20px;
             font-size: 13px;
-            color: #6B4A3A;
+            color: var(--text-primary);
             text-align: center;
             line-height: 1.4;
             min-width: 80px;
-            border: 1px solid #F5E6D3;
+            border: 1px solid var(--border-container);
             font-weight: 500;
             flex-shrink: 0;
             z-index: 5;
+            transition: background 0.4s ease, color 0.4s ease, border-color 0.4s ease;
         }
         .header .date-badge .weekday {
             font-size: 11px;
-            color: #B8957A;
+            color: var(--text-secondary);
+            transition: color 0.4s ease;
         }
 
         /* ===== 统计卡片 ===== */
@@ -127,38 +466,56 @@
             margin-bottom: 24px;
         }
         .stats-card {
-            background: #FFF8F0;
+            background: var(--bg-card);
             border-radius: 16px;
             padding: 16px 12px;
             text-align: center;
-            border: 1px solid #F5E6D3;
+            border: 1px solid var(--border-card);
+            transition: background 0.4s ease, border-color 0.4s ease;
+            position: relative;
+            overflow: hidden;
+        }
+        .stats-card::after {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: var(--gradient-title);
+            opacity: 0.3;
+            transition: opacity 0.4s ease;
         }
         .stats-card .number {
             font-size: 28px;
             font-weight: 700;
-            color: #C49A6C;
+            color: var(--color-number);
             line-height: 1.2;
+            transition: color 0.4s ease;
         }
         .stats-card .label {
             font-size: 12px;
-            color: #B8957A;
+            color: var(--text-secondary);
             margin-top: 4px;
+            transition: color 0.4s ease;
         }
         .stats-card .sub-label {
             font-size: 11px;
-            color: #C9B09C;
+            color: var(--text-muted);
             margin-top: 2px;
+            transition: color 0.4s ease;
         }
 
         /* ===== 章节标题 ===== */
         .section-title {
             font-size: 17px;
             font-weight: 600;
-            color: #6B4A3A;
+            color: var(--text-primary);
             margin: 24px 0 14px 0;
             display: flex;
             align-items: center;
             gap: 10px;
+            transition: color 0.4s ease;
         }
         .section-title .emoji {
             font-size: 20px;
@@ -166,28 +523,32 @@
         .section-title .line {
             flex: 1;
             height: 1px;
-            background: linear-gradient(to right, #F0DDCC, transparent);
+            background: var(--gradient-line);
+            transition: background 0.4s ease;
         }
 
         /* ===== 热门话题 ===== */
         .topic-item {
-            background: #FFFCF5;
+            background: var(--bg-topic);
             border-radius: 12px;
             padding: 14px 16px;
             margin-bottom: 10px;
-            border-left: 4px solid #D4A574;
-            box-shadow: 0 2px 8px rgba(180, 140, 100, 0.06);
+            border-left: 4px solid var(--border-topic);
+            box-shadow: 0 2px 8px var(--shadow-color);
+            transition: background 0.4s ease, border-color 0.4s ease, box-shadow 0.4s ease;
         }
         .topic-item .topic-title {
             font-weight: 600;
-            color: #5A3F32;
+            color: var(--text-dark);
             font-size: 15px;
+            transition: color 0.4s ease;
         }
         .topic-item .topic-detail {
             font-size: 13px;
-            color: #8A6A5A;
+            color: var(--text-medium);
             margin-top: 4px;
             line-height: 1.5;
+            transition: color 0.4s ease;
         }
         .topic-item .topic-roast {
             display: flex;
@@ -195,19 +556,21 @@
             gap: 8px;
             margin-top: 8px;
             padding-top: 8px;
-            border-top: 1px dashed #F5E6D3;
+            border-top: 1px dashed var(--bg-divider);
             font-size: 13px;
-            color: #A08070;
+            color: var(--text-light);
             font-style: italic;
+            transition: color 0.4s ease, border-color 0.4s ease;
         }
         .topic-item .topic-roast .avatar-sm {
             width: 24px;
             height: 24px;
             border-radius: 50%;
-            border: 2px solid #F0DDCC;
+            border: 2px solid var(--bg-divider);
             flex-shrink: 0;
             overflow: hidden;
-            background: #F5E6D3;
+            background: var(--bg-avatar);
+            transition: border-color 0.4s ease;
         }
         .topic-item .topic-roast .avatar-sm img {
             width: 100%;
@@ -223,16 +586,19 @@
             display: flex;
             flex-wrap: wrap;
             gap: 8px 16px;
-            background: #FFF8F0;
+            background: var(--bg-userlist);
             border-radius: 12px;
             padding: 12px 16px;
+            transition: background 0.4s ease;
+            border: 1px solid var(--border-card);
         }
         .user-item {
             display: flex;
             align-items: center;
             gap: 8px;
             font-size: 14px;
-            color: #5A3F32;
+            color: var(--text-dark);
+            transition: color 0.4s ease;
         }
         .user-item .avatar-square {
             width: 36px;
@@ -240,8 +606,9 @@
             border-radius: 8px;
             flex-shrink: 0;
             overflow: hidden;
-            background: #F5E6D3;
-            border: 2px solid #F0DDCC;
+            background: var(--bg-avatar);
+            border: 2px solid var(--bg-divider);
+            transition: border-color 0.4s ease, background 0.4s ease;
         }
         .user-item .avatar-square img {
             width: 100%;
@@ -252,22 +619,24 @@
             font-weight: 600;
         }
         .user-item .count {
-            color: #C49A6C;
+            color: var(--color-count);
             font-weight: 600;
             font-size: 13px;
+            transition: color 0.4s ease;
         }
 
         /* ===== 金句 ===== */
         .quote-box {
             border-radius: 12px;
             padding: 16px 20px;
-            border: 1px solid #F5E6D3;
-            box-shadow: 0 2px 8px rgba(180, 140, 100, 0.06);
+            border: 1px solid var(--border-card);
+            box-shadow: 0 2px 8px var(--shadow-color);
             margin-bottom: 10px;
-            background: #FFFCF5;
+            background: var(--bg-quote);
             position: relative;
             overflow: visible;
             min-height: 60px;
+            transition: background 0.4s ease, border-color 0.4s ease, box-shadow 0.4s ease;
         }
         .quote-box .quote-bg-avatar {
             position: absolute;
@@ -294,36 +663,41 @@
         }
         .quote-box .quote-text {
             font-size: 15px;
-            color: #4A3328;
+            color: var(--text-dark);
             line-height: 1.6;
             font-style: italic;
+            transition: color 0.4s ease;
         }
         .quote-box .quote-text::before {
             content: "「";
-            color: #D4A574;
+            color: var(--decoration-color);
+            transition: color 0.4s ease;
         }
         .quote-box .quote-text::after {
             content: "」";
-            color: #D4A574;
+            color: var(--decoration-color);
+            transition: color 0.4s ease;
         }
         .quote-box .quote-sender {
             font-size: 13px;
-            color: #B8957A;
+            color: var(--text-secondary);
             margin-top: 6px;
             text-align: right;
+            transition: color 0.4s ease;
         }
 
         /* 最佳金句高亮 */
         .quote-box.best {
-            border: 2px solid #D4A574;
-            background: linear-gradient(135deg, #FFFCF5, #FFF5E8);
+            border: 2px solid var(--color-border-avatar);
+            background: var(--bg-best);
             overflow: visible;
+            transition: border-color 0.4s ease, background 0.4s ease;
         }
         .quote-box.best .best-badge {
             position: absolute;
             top: -12px;
             right: 12px;
-            background: #D4A574;
+            background: var(--color-best-badge);
             color: #FFF;
             font-size: 11px;
             font-weight: 600;
@@ -331,8 +705,9 @@
             border-radius: 12px;
             letter-spacing: 0.5px;
             z-index: 20;
-            box-shadow: 0 2px 10px rgba(180, 140, 100, 0.3);
+            box-shadow: 0 2px 10px var(--shadow-color);
             white-space: nowrap;
+            transition: background 0.4s ease, box-shadow 0.4s ease;
         }
         .quote-box .best-reason {
             display: flex;
@@ -340,18 +715,20 @@
             gap: 10px;
             margin-top: 10px;
             padding-top: 10px;
-            border-top: 1px dashed #F0DDCC;
+            border-top: 1px dashed var(--bg-divider);
             font-size: 13px;
-            color: #8A6A5A;
+            color: var(--text-medium);
+            transition: color 0.4s ease, border-color 0.4s ease;
         }
         .quote-box .best-reason .avatar-md {
             width: 32px;
             height: 32px;
             border-radius: 50%;
-            border: 2px solid #D4A574;
+            border: 2px solid var(--color-border-avatar);
             flex-shrink: 0;
             overflow: hidden;
-            background: #F5E6D3;
+            background: var(--bg-avatar);
+            transition: border-color 0.4s ease;
         }
         .quote-box .best-reason .avatar-md img {
             width: 100%;
@@ -366,21 +743,23 @@
         .sharp-comment {
             margin-top: 24px;
             padding: 0;
-            background: linear-gradient(135deg, #FFF8F0, #FFF0E0);
+            background: var(--bg-sharp);
             border-radius: 16px;
-            border: 1px solid #F0DDCC;
+            border: 1px solid var(--border-sharp);
             display: flex;
             align-items: stretch;
             overflow: hidden;
+            transition: background 0.4s ease, border-color 0.4s ease;
         }
         .sharp-comment .avatar-trapezoid {
             flex: 0 0 120px;
             min-height: 100px;
-            background: #F5E6D3;
+            background: var(--bg-avatar);
             clip-path: polygon(0 0, 100% 0, 80% 100%, 0% 100%);
             overflow: hidden;
             position: relative;
             border-right: none;
+            transition: background 0.4s ease;
         }
         .sharp-comment .avatar-trapezoid img {
             width: 100%;
@@ -397,23 +776,26 @@
         }
         .sharp-comment .comment-body .comment-label {
             font-size: 13px;
-            color: #B8957A;
+            color: var(--text-secondary);
             font-weight: 500;
+            transition: color 0.4s ease;
         }
         .sharp-comment .comment-body .comment-content {
             font-size: 15px;
-            color: #5A3F32;
+            color: var(--text-dark);
             margin-top: 4px;
             line-height: 1.7;
+            transition: color 0.4s ease;
         }
 
         /* ===== 空状态 ===== */
         .empty-placeholder {
             text-align: center;
-            color: #C9B09C;
+            color: var(--text-muted);
             font-size: 28px;
             padding: 8px 0;
             font-weight: 300;
+            transition: color 0.4s ease;
         }
 
         /* ===== 页脚 ===== */
@@ -421,16 +803,18 @@
             margin-top: 28px;
             text-align: center;
             font-size: 12px;
-            color: #C9B09C;
-            border-top: 1px dashed #F0DDCC;
+            color: var(--text-muted);
+            border-top: 1px dashed var(--bg-divider);
             padding-top: 18px;
             line-height: 1.8;
+            transition: color 0.4s ease, border-color 0.4s ease;
         }
         .footer .credit {
             font-size: 11px;
-            color: #D4A574;
+            color: var(--color-credit);
             letter-spacing: 1px;
             margin-top: 2px;
+            transition: color 0.4s ease;
         }
 
         /* ===== 响应式 ===== */
@@ -443,11 +827,55 @@
             .quote-box .quote-bg-avatar { width: 80px; }
             .header .group-avatar-stamp { width: 90px; height: 90px; top: -10px; left: -10px; }
             .header { padding-left: 70px; }
+            .theme-sakura .sakura-petal { display: none; }
+            .theme-diamond .sparkle { display: none; }
+            .theme-sky .cloud-deco { display: none; }
+            .theme-clover .clover-border { display: none; }
+            .container .corner-deco { display: none; }
         }
     </style>
 </head>
 <body>
-<div class="container">
+<div class="container theme-{{ theme }}">
+    <!-- 主题特有装饰元素 -->
+    {% if theme == 'sakura' %}
+    <span class="sakura-petal">🌸</span>
+    <span class="sakura-petal">🌸</span>
+    <span class="sakura-petal">🌸</span>
+    <span class="sakura-petal">🌸</span>
+    {% elif theme == 'clover' %}
+    <div class="clover-border top"></div>
+    <div class="clover-border bottom"></div>
+    <span class="corner-deco tl">🍀</span>
+    <span class="corner-deco tr">🍀</span>
+    <span class="corner-deco bl">🍀</span>
+    <span class="corner-deco br">🍀</span>
+    {% elif theme == 'diamond' %}
+    <span class="sparkle">✦</span>
+    <span class="sparkle">✦</span>
+    <span class="sparkle">✦</span>
+    <span class="sparkle">✦</span>
+    <span class="sparkle">✦</span>
+    <span class="sparkle">✦</span>
+    <span class="corner-deco tl">◆</span>
+    <span class="corner-deco tr">◆</span>
+    <span class="corner-deco bl">◆</span>
+    <span class="corner-deco br">◆</span>
+    {% elif theme == 'sky' %}
+    <span class="cloud-deco">☁</span>
+    <span class="cloud-deco">☁</span>
+    <span class="cloud-deco">☁</span>
+    <span class="corner-deco tl">☁</span>
+    <span class="corner-deco tr">☁</span>
+    <span class="corner-deco bl">☁</span>
+    <span class="corner-deco br">☁</span>
+    {% elif theme == 'warm' %}
+    <span class="corner-deco tl">✦</span>
+    <span class="corner-deco tr">✦</span>
+    <span class="corner-deco bl">✦</span>
+    <span class="corner-deco br">✦</span>
+    {% endif %}
+
     <!-- 头部 -->
     <div class="header">
         <div class="group-avatar-stamp" style="border-color: {{ group_avatar_border_color }}; box-shadow: 0 8px 28px {{ group_avatar_border_color }}50;">
@@ -506,7 +934,7 @@
     <div class="empty-placeholder">？</div>
     {% endfor %}
 
-    <!-- 活跃用户（只显示昵称，不带 #QQ号） -->
+    <!-- 活跃用户 -->
     <div class="section-title">
         <span class="emoji">👤</span> 活跃用户
         <span class="line"></span>
@@ -526,14 +954,13 @@
         {% endfor %}
     </div>
 
-    <!-- 金句（只显示昵称，不带 #QQ号） -->
+    <!-- 金句 -->
     {% if quote_max > 0 and analysis.quotes %}
     <div class="section-title">
         <span class="emoji">💡</span> 今日金句
         <span class="line"></span>
     </div>
 
-    {# 合并金句列表，确保最佳金句在原位置 #}
     {% set best_text = analysis.best_quote.text if analysis.best_quote else None %}
     {% for quote in analysis.quotes[:quote_max] %}
         {% set is_best = (best_text and quote.text == best_text) %}
