@@ -36,6 +36,16 @@ WARM_COLORS = [
 ]
 
 
+def parse_user_tag(text: str):
+    """从 "昵称#QQ号" 格式中提取昵称和 QQ号"""
+    if '#' not in text:
+        return text, None
+    parts = text.rsplit('#', 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return parts[0], parts[1]
+    return text, None
+
+
 class KiraDailyReport(BasePlugin):
     def __init__(self, ctx, cfg: dict):
         super().__init__(ctx, cfg)
@@ -43,11 +53,11 @@ class KiraDailyReport(BasePlugin):
         # ---- 配置加载 ----
         self.enabled_groups = cfg.get("enabled_groups", [])
         self.auto_enabled_groups = cfg.get("auto_enabled_groups", [])
-        self.enable_command_trigger = cfg.get("enable_command_trigger", True)
+        self.enable_command_trigger = cfg.get("enable_command_trigger", False)
         self.enable_natural_language_trigger = cfg.get("enable_natural_language_trigger", True)
         self.command_prefixes = cfg.get("command_prefixes", ["/日报", "/群日报"])
         self.analysis_days = cfg.get("analysis_days", 1)
-        self.max_messages_per_analysis = cfg.get("max_messages_per_analysis", 200)
+        self.max_messages_per_analysis = cfg.get("max_messages_per_analysis", 500)
         self.min_messages_threshold = cfg.get("min_messages_threshold", 10)
         self.auto_analysis_time = cfg.get("auto_analysis_time", "23:59")
         self.enable_auto_analysis = cfg.get("enable_auto_analysis", True)
@@ -60,7 +70,7 @@ class KiraDailyReport(BasePlugin):
         self.topic_min = cfg.get("topic_min", 1)
         self.topic_max = cfg.get("topic_max", 5)
         self.quote_max = cfg.get("quote_max", 3)
-        self.active_users_max = cfg.get("active_users_max", 5)
+        self.active_users_max = cfg.get("active_users_max", 10)
         self.max_concurrent_analysis = cfg.get("max_concurrent_analysis", 3)
         self.report_retention_days = cfg.get("report_retention_days", 7)
         self.report_cleanup_count = cfg.get("report_cleanup_count", 7)
@@ -71,7 +81,13 @@ class KiraDailyReport(BasePlugin):
         self.llm_model = cfg.get("llm_model", "")
         self.exclude_senders = cfg.get("exclude_senders", ["system"])
         self.prefer_system_browser = cfg.get("prefer_system_browser", True)
-        self.render_timeout = cfg.get("render_timeout", 30)
+        self.render_timeout = cfg.get("render_timeout", 120)
+
+        # ---- Bot 消息行为（内部固定，无配置项） ----
+        # 始终收集 Bot 消息，计入统计，但不参与 LLM 分析（话题、金句、活跃用户）
+        self._collect_bot_messages = True
+        self._count_bot_in_stats = True
+        self._include_bot_in_llm_analysis = False
 
         # 增量模式配置
         self.enable_incremental_mode = cfg.get("enable_incremental_mode", False)
@@ -81,8 +97,8 @@ class KiraDailyReport(BasePlugin):
         self.window_hours = cfg.get("window_hours", 24)
 
         # 自定义消息
-        self.msg_too_few = cfg.get("msg_too_few", "📊 群聊日报：今日消息数 ({count}) 不足 {threshold} 条，暂不生成日报~")
-        self.msg_cooldown = cfg.get("msg_cooldown", "⏳ 日报生成冷却中，剩余 {remaining:.1f} 小时~")
+        self.msg_too_few = cfg.get("msg_too_few", "📊 群聊日报：今日消息数 ({count}) 不足 {threshold} 条，暂不生成日报")
+        self.msg_cooldown = cfg.get("msg_cooldown", "⏳ 日报生成冷却中，剩余 {remaining:.1f} 小时")
         self.msg_not_enabled = cfg.get("msg_not_enabled", "❌ 该群未启用日报功能")
         self.msg_not_group = cfg.get("msg_not_group", "❌ 请在群聊中使用此功能")
         self.msg_processing = cfg.get("msg_processing", "📊 正在生成日报，请稍候...")
@@ -121,6 +137,9 @@ class KiraDailyReport(BasePlugin):
         self._bot_self_id: Optional[str] = None
         self._bot_nickname: Optional[str] = None
         self._bot_avatar: Optional[str] = None
+
+        # Bot 消息去重（仅用于内部）
+        self._collected_bot_messages: Set[str] = set()
 
         logger.info("[KiraDaily] 插件已加载")
 
@@ -355,7 +374,7 @@ class KiraDailyReport(BasePlugin):
         self._cooldown_map[group_id] = time.time()
 
     # ============================================================
-    # 消息收集（含屏蔽发送者）
+    # 消息收集（普通用户 + Bot）
     # ============================================================
 
     @on.im_message(priority=Priority.HIGH)
@@ -367,11 +386,19 @@ class KiraDailyReport(BasePlugin):
         if not group_id or not self._is_group_enabled(group_id):
             return
 
-        # 检查发送者是否在屏蔽列表中
         sender_nickname = event.message.sender.nickname if event.message.sender else ""
         if sender_nickname in self.exclude_senders:
             self._log(f"屏蔽消息: 发送者 {sender_nickname} 在排除列表中，已忽略")
             return
+
+        # 如果是 Bot 自己的消息，且我们不收集，则跳过
+        self_id = str(event.message.self_id) if hasattr(event.message, 'self_id') else None
+        user_id = str(event.message.sender.user_id) if event.message.sender else None
+        if self_id and user_id == self_id:
+            if not self._collect_bot_messages:
+                self._log(f"忽略 bot 自己的消息 (收集开关已关闭)")
+                return
+            # 否则继续，将 Bot 消息入库
 
         text_parts = []
         for elem in event.message.chain:
@@ -400,6 +427,79 @@ class KiraDailyReport(BasePlugin):
             timestamp=timestamp
         )
         self._log(f"收集消息: {group_id} | {nickname}: {content[:30]}...")
+
+    # ============================================================
+    # 备选：通过 message_sent 捕获 Bot 消息（适配器未触发 im_message 时使用）
+    # ============================================================
+
+    @on.message_sent(priority=Priority.MEDIUM)
+    async def collect_bot_message(self, event: KiraMessageBatchEvent, *args, **kwargs):
+        """备用：通过 message_sent 捕获机器人发送的群消息"""
+        if not self._collect_bot_messages:
+            return
+
+        if not event.messages:
+            return
+        last_msg = event.messages[-1]
+
+        # 检查是否为群消息
+        group_id = None
+        if hasattr(last_msg, 'group') and last_msg.group:
+            group_id = f"qq:gm:{last_msg.group.group_id}"
+        else:
+            return
+
+        if not group_id or not self._is_group_enabled(group_id):
+            return
+
+        user_id = str(last_msg.sender.user_id) if last_msg.sender else None
+        self_id = str(event.self_id) if hasattr(event, 'self_id') else None
+
+        # 只收集 Bot 自己的消息
+        if not self_id or user_id != self_id:
+            return
+
+        # 去重
+        msg_id = str(last_msg.message_id) if hasattr(last_msg, 'message_id') else None
+        if msg_id and msg_id in self._collected_bot_messages:
+            return
+        if msg_id:
+            self._collected_bot_messages.add(msg_id)
+
+        # 提取内容
+        text_parts = []
+        has_valid_content = False
+        for elem in last_msg.chain:
+            if isinstance(elem, (Text, At, Image, File, Record, Video)):
+                has_valid_content = True
+                if isinstance(elem, Text):
+                    text_parts.append(elem.text)
+                elif isinstance(elem, At):
+                    text_parts.append(f"@{elem.nickname or elem.pid}")
+                elif isinstance(elem, Image):
+                    text_parts.append("[图片]")
+                elif isinstance(elem, (File, Record, Video)):
+                    text_parts.append(f"[{elem.__class__.__name__}]")
+        if not has_valid_content:
+            return
+
+        content = " ".join(text_parts).strip()
+        if not content:
+            content = "[图片/表情]"
+
+        nickname = last_msg.sender.nickname if last_msg.sender else "Bot"
+        if nickname == "未知" or nickname == "unknown":
+            nickname = self._bot_nickname or "Bot"
+        timestamp = last_msg.timestamp or int(time.time())
+
+        await self.db.save_message(
+            session_id=group_id,
+            user_id=user_id,
+            nickname=nickname,
+            content=content,
+            timestamp=timestamp
+        )
+        self._log(f"收集bot消息(备用): {group_id} | {nickname}: {content[:30]}...")
 
     # ============================================================
     # LLM 调用（支持自定义模型）
@@ -437,10 +537,15 @@ class KiraDailyReport(BasePlugin):
     # ============================================================
 
     async def _build_analysis_prompt(self, messages: List[dict], truncated: bool) -> str:
+        # 固定过滤 Bot 消息（不参与 LLM 分析）
+        if self._bot_self_id:
+            messages = [m for m in messages if m['user_id'] != self._bot_self_id]
+
         msg_lines = []
         for msg in messages[-200:]:
             ts = datetime.fromtimestamp(msg["timestamp"]).strftime("%H:%M")
-            msg_lines.append(f"[{ts}] {msg['nickname']}: {msg['content']}")
+            user_tag = f"{msg['nickname']}#{msg['user_id']}"
+            msg_lines.append(f"[{ts}] {user_tag}: {msg['content']}")
         msg_text = "\n".join(msg_lines)
 
         persona_prompt = ""
@@ -464,12 +569,15 @@ class KiraDailyReport(BasePlugin):
 
 {persona_prompt}
 
+【重要：用户标识】
+聊天记录中每个用户名字后面都有 `#QQ号` 后缀（如 `周武#123456`），即使名字相同，QQ号不同代表不同用户。请在输出中保持使用完整的 `名字#QQ号` 格式。
+
 【分析要求】
 1. 一句话总结：用一句简短有趣的话概括今天群聊的氛围（放在日报头部）。
 2. 统计数据：总消息数、参与人数、最活跃时段（请给出时间段，格式如 "20:00-22:00"）。
 3. 热门话题：提取{self.topic_min}-{self.topic_max}个主要话题，每个话题包含：标题、描述、AI吐槽（一句话毒舌吐槽）。
-4. 活跃用户：列出发言最多的前{self.active_users_max}位用户及发言数。
-5. 金句：选出{self.quote_max}条最精彩的发言。如果有多条，标注其中一条为"最佳金句"并说明理由。
+4. 活跃用户：列出发言最多的前{self.active_users_max}位用户及发言数，`name` 字段必须使用 `名字#QQ号` 格式。
+5. 金句：选出{self.quote_max}条最精彩的发言。如果有多条，标注其中一条为"最佳金句"并说明理由，`sender` 字段必须使用 `名字#QQ号` 格式。
 {sharp_instruction}
 
 【输出格式】（严格按JSON格式输出）
@@ -480,14 +588,14 @@ class KiraDailyReport(BasePlugin):
     {{"title": "话题1", "detail": "简短描述", "roast": "AI吐槽"}}
   ],
   "active_users": [
-    {{"name": "用户A", "count": 10}}
+    {{"name": "周武#123456", "count": 10}}
   ],
   "quotes": [
-    {{"text": "金句内容", "sender": "用户A"}}
+    {{"text": "金句内容", "sender": "周武#123456"}}
   ],
   "best_quote": {{
     "text": "最佳金句内容",
-    "sender": "用户A",
+    "sender": "周武#123456",
     "reason": "AI选取此句的理由"
   }},
   "sharp_comment": "AI锐评一句话"
@@ -503,26 +611,33 @@ class KiraDailyReport(BasePlugin):
     # ============================================================
 
     async def _call_llm_incremental(self, messages: List[dict]) -> dict:
-        """增量分析专用（精简版）"""
+        # 固定过滤 Bot 消息
+        if self._bot_self_id:
+            messages = [m for m in messages if m['user_id'] != self._bot_self_id]
+
         msg_lines = []
         for msg in messages[-200:]:
             ts = datetime.fromtimestamp(msg["timestamp"]).strftime("%H:%M")
-            msg_lines.append(f"[{ts}] {msg['nickname']}: {msg['content']}")
+            user_tag = f"{msg['nickname']}#{msg['user_id']}"
+            msg_lines.append(f"[{ts}] {user_tag}: {msg['content']}")
         msg_text = "\n".join(msg_lines)
 
         prompt = f"""请分析以下聊天记录，提取关键信息。
 
+【重要：用户标识】
+聊天记录中每个用户名字后面都有 `#QQ号` 后缀（如 `周武#123456`），即使名字相同，QQ号不同代表不同用户。请在输出中保持使用完整的 `名字#QQ号` 格式。
+
 【要求】
 1. 提取 2-3 个话题（标题+简短描述+AI吐槽）
-2. 提取 2-3 条金句（发言内容+发送者）
-3. 列出发言最多的 {self.active_users_max} 位用户及发言数
+2. 提取 2-3 条金句（发言内容+发送者，`sender` 字段必须使用 `名字#QQ号` 格式）
+3. 列出发言最多的 {self.active_users_max} 位用户及发言数，`name` 字段必须使用 `名字#QQ号` 格式
 4. 一句话锐评
 
 【输出格式】（严格JSON）
 {{
   "topics": [{{"title": "...", "detail": "...", "roast": "..."}}],
-  "quotes": [{{"text": "...", "sender": "..."}}],
-  "active_users": [{{"name": "...", "count": 0}}],
+  "quotes": [{{"text": "...", "sender": "周武#123456"}}],
+  "active_users": [{{"name": "周武#123456", "count": 0}}],
   "sharp_comment": "..."
 }}
 
@@ -552,6 +667,24 @@ class KiraDailyReport(BasePlugin):
             result = await self._call_llm_incremental(messages)
             if not result:
                 return False
+
+            # 金句过滤（基于 user_id）
+            quotes = result.get('quotes', [])
+            filtered_quotes = []
+            for q in quotes:
+                sender = q.get('sender', '')
+                _, uid = parse_user_tag(sender)
+                if uid and uid == self._bot_self_id:
+                    continue
+                filtered_quotes.append(q)
+            result['quotes'] = filtered_quotes
+
+            if result.get('best_quote'):
+                best = result['best_quote']
+                sender = best.get('sender', '')
+                _, uid = parse_user_tag(sender)
+                if uid and uid == self._bot_self_id:
+                    result['best_quote'] = None
 
             await self.db.save_incremental_batch(
                 session_id=group_id,
@@ -594,7 +727,12 @@ class KiraDailyReport(BasePlugin):
                 quotes = json.loads(batch['quotes_json'])
                 users = json.loads(batch['active_users_json'])
                 for u in users:
-                    all_users[u['name']] = all_users.get(u['name'], 0) + u['count']
+                    name_tag = u.get('name', '')
+                    _, uid = parse_user_tag(name_tag)
+                    if uid:
+                        all_users[uid] = all_users.get(uid, 0) + u.get('count', 0)
+                    else:
+                        all_users[name_tag] = all_users.get(name_tag, 0) + u.get('count', 0)
                 all_topics.extend(topics)
                 all_quotes.extend(quotes)
                 if batch.get('sharp_comment'):
@@ -617,7 +755,13 @@ class KiraDailyReport(BasePlugin):
                 unique_quotes.append(quote)
 
         sorted_users = sorted(all_users.items(), key=lambda x: x[1], reverse=True)
-        top_users = [{'name': name, 'count': count} for name, count in sorted_users[:self.active_users_max]]
+        top_users = []
+        for key, count in sorted_users[:self.active_users_max]:
+            nickname = await self._get_nickname_by_user_id(group_id, key)
+            top_users.append({
+                'name': f"{nickname}#{key}",
+                'count': count
+            })
 
         return {
             'stats': {
@@ -632,6 +776,23 @@ class KiraDailyReport(BasePlugin):
             'sharp_comment': all_sharp_comments[-1] if all_sharp_comments else '',
             'header_comment': f"📊 基于 {len(batches)} 个时段汇总的群聊日报"
         }
+
+    # ============================================================
+    # 辅助方法：根据 user_id 获取昵称
+    # ============================================================
+
+    async def _get_nickname_by_user_id(self, group_id: str, user_id: str) -> str:
+        try:
+            cursor = await self.db._conn.execute(
+                "SELECT nickname FROM messages WHERE session_id = ? AND user_id = ? ORDER BY timestamp DESC LIMIT 1",
+                (group_id, user_id)
+            )
+            row = await cursor.fetchone()
+            if row:
+                return row[0]
+        except Exception:
+            pass
+        return user_id
 
     # ============================================================
     # 生成报告（图片/文本）
@@ -654,57 +815,85 @@ class KiraDailyReport(BasePlugin):
         ]
         title_font = random.choice(title_fonts)
 
-        nickname_to_userid = {}
-        for msg in reversed(messages):
-            if msg['nickname'] not in nickname_to_userid:
-                nickname_to_userid[msg['nickname']] = msg['user_id']
-
+        # 从 active_users 中提取 user_id
         user_avatars = {}
-        for user in analysis_result.get('active_users', []):
-            name = user.get('name', '')
-            user_id = nickname_to_userid.get(name, '')
-            if user_id and user_id.isdigit():
-                avatar = await self.avatar_cache.get_user_avatar(user_id)
-                user_avatars[name] = avatar
-            else:
-                user_avatars[name] = self._bot_avatar or await self.avatar_cache.get_bot_avatar('0')
-        for quote in analysis_result.get('quotes', []):
-            sender = quote.get('sender', '')
-            if sender and sender not in user_avatars:
-                user_id = nickname_to_userid.get(sender, '')
-                if user_id and user_id.isdigit():
-                    avatar = await self.avatar_cache.get_user_avatar(user_id)
-                    user_avatars[sender] = avatar
-                else:
-                    user_avatars[sender] = self._bot_avatar or await self.avatar_cache.get_bot_avatar('0')
-        if analysis_result.get('best_quote'):
-            sender = analysis_result['best_quote'].get('sender', '')
-            if sender and sender not in user_avatars:
-                user_id = nickname_to_userid.get(sender, '')
-                if user_id and user_id.isdigit():
-                    avatar = await self.avatar_cache.get_user_avatar(user_id)
-                    user_avatars[sender] = avatar
-                else:
-                    user_avatars[sender] = self._bot_avatar or await self.avatar_cache.get_bot_avatar('0')
-
-        # ============================================================
-        # 活跃用户样式：使用纯色（单色）
-        # ============================================================
+        user_styles = {}
         border_colors_list = [
             "#D4A574", "#C9B0A0", "#E8C8A0", "#D4B8A8", "#C4A88C", "#E0C8B8",
             "#F5D0B0", "#D9B8A0", "#CFAFA0", "#E6C8B0", "#DDBFA8", "#F0D0C0"
         ]
-        user_styles = {}
         shuffled_colors = WARM_COLORS.copy()
         random.shuffle(shuffled_colors)
-        for idx, user in enumerate(analysis_result.get('active_users', [])):
-            name = user.get('name', '')
-            border_color = random.choice(border_colors_list)
-            color = shuffled_colors[idx % len(shuffled_colors)]
-            user_styles[name] = {
-                "border_color": border_color,
-                "name_color": color
-            }
+
+        active_users = analysis_result.get('active_users', [])
+        for idx, user in enumerate(active_users):
+            name_tag = user.get('name', '')
+            display_name, uid = parse_user_tag(name_tag)
+            if uid and uid.isdigit():
+                # 如果 uid 是 Bot，跳过（但理论上 LLM 不会输出 Bot，因为消息已过滤）
+                if uid == self._bot_self_id:
+                    continue
+                avatar = await self.avatar_cache.get_user_avatar(uid)
+                user_avatars[name_tag] = avatar
+                border_color = random.choice(border_colors_list)
+                color = shuffled_colors[idx % len(shuffled_colors)]
+                user_styles[name_tag] = {
+                    "border_color": border_color,
+                    "name_color": color,
+                    "display_name": display_name or name_tag
+                }
+            else:
+                avatar = await self.avatar_cache.get_user_avatar(name_tag) if name_tag.isdigit() else self._bot_avatar
+                user_avatars[name_tag] = avatar
+                border_color = random.choice(border_colors_list)
+                color = shuffled_colors[idx % len(shuffled_colors)]
+                user_styles[name_tag] = {
+                    "border_color": border_color,
+                    "name_color": color,
+                    "display_name": name_tag
+                }
+
+        # 过滤掉 Bot 的活跃用户（安全措施）
+        filtered_active_users = []
+        for user in active_users:
+            name_tag = user.get('name', '')
+            _, uid = parse_user_tag(name_tag)
+            if uid and uid == self._bot_self_id:
+                continue
+            filtered_active_users.append(user)
+        analysis_result['active_users'] = filtered_active_users
+
+        for quote in analysis_result.get('quotes', []):
+            sender_tag = quote.get('sender', '')
+            _, uid = parse_user_tag(sender_tag)
+            if uid and uid.isdigit() and sender_tag not in user_avatars:
+                if uid == self._bot_self_id:
+                    continue
+                avatar = await self.avatar_cache.get_user_avatar(uid)
+                user_avatars[sender_tag] = avatar
+                if sender_tag not in user_styles:
+                    display_name, _ = parse_user_tag(sender_tag)
+                    user_styles[sender_tag] = {
+                        "border_color": random.choice(border_colors_list),
+                        "name_color": random.choice(WARM_COLORS),
+                        "display_name": display_name or sender_tag
+                    }
+        if analysis_result.get('best_quote'):
+            sender_tag = analysis_result['best_quote'].get('sender', '')
+            _, uid = parse_user_tag(sender_tag)
+            if uid and uid.isdigit() and sender_tag not in user_avatars:
+                if uid == self._bot_self_id:
+                    analysis_result['best_quote'] = None
+                else:
+                    avatar = await self.avatar_cache.get_user_avatar(uid)
+                    user_avatars[sender_tag] = avatar
+                    if sender_tag not in user_styles:
+                        display_name, _ = parse_user_tag(sender_tag)
+                        user_styles[sender_tag] = {
+                            "border_color": random.choice(border_colors_list),
+                            "name_color": random.choice(WARM_COLORS),
+                            "display_name": display_name or sender_tag
+                        }
 
         if not self._bot_avatar:
             await self._fetch_bot_info()
@@ -777,15 +966,21 @@ class KiraDailyReport(BasePlugin):
         lines.append("")
         lines.append("👤 活跃用户:")
         for user in active_users[:self.active_users_max]:
-            lines.append(f"  • {user.get('name', '')}: {user.get('count', 0)}条")
+            name_tag = user.get('name', '')
+            display_name, _ = parse_user_tag(name_tag)
+            lines.append(f"  • {display_name or name_tag}: {user.get('count', 0)}条")
         lines.append("")
         if quotes:
             lines.append("💡 金句:")
             for q in quotes[:self.quote_max]:
-                lines.append(f"  • {q.get('sender', '')}: {q.get('text', '')}")
+                sender = q.get('sender', '')
+                display_name, _ = parse_user_tag(sender)
+                lines.append(f"  • {display_name or sender}: {q.get('text', '')}")
         best = analysis_result.get('best_quote')
         if best:
-            lines.append(f"  ⭐ 最佳: {best.get('sender', '')}: {best.get('text', '')}")
+            sender = best.get('sender', '')
+            display_name, _ = parse_user_tag(sender)
+            lines.append(f"  ⭐ 最佳: {display_name or sender}: {best.get('text', '')}")
             lines.append(f"     理由: {best.get('reason', '')}")
         lines.append("")
         if sharp_comment:
@@ -858,6 +1053,24 @@ class KiraDailyReport(BasePlugin):
                 if not result:
                     await self._send_text_to_group(group_id, "❌ LLM 分析失败，请重试")
                     return True
+
+                # 金句过滤
+                quotes = result.get('quotes', [])
+                filtered_quotes = []
+                for q in quotes:
+                    sender = q.get('sender', '')
+                    _, uid = parse_user_tag(sender)
+                    if uid and uid == self._bot_self_id:
+                        continue
+                    filtered_quotes.append(q)
+                result['quotes'] = filtered_quotes
+
+                if result.get('best_quote'):
+                    best = result['best_quote']
+                    sender = best.get('sender', '')
+                    _, uid = parse_user_tag(sender)
+                    if uid and uid == self._bot_self_id:
+                        result['best_quote'] = None
 
                 stats = result.get('stats', {})
                 stats['total_messages'] = total_msgs
