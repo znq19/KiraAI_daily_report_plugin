@@ -265,7 +265,7 @@
     "default": 120,
     "minimum": 10,
     "maximum": 300,
-    "hint": "HTML 渲染为图片的超时时间，超时后任务失败"
+    "hint": "HTML 渲染为图片的超时时间，超时后任务失败。注意，KIraAI有默认工具超时，请同步在Webui配置项修改"
   },
   "msg_too_few": {
     "type": "string",
