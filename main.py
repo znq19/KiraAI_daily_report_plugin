@@ -1019,18 +1019,24 @@ class KiraDailyReport(BasePlugin):
 
         async with self._semaphore:
             try:
+                # ============================================================
+                # 1. 尝试增量模式
+                # ============================================================
                 if self._is_incremental_group(group_id):
-                    self._log(f"增量模式：合并群 {group_id} 的批次")
+                    self._log(f"增量模式：尝试合并群 {group_id} 的批次")
                     result = await self._merge_batches(group_id)
-                    if not result:
-                        await self._send_text_to_group(group_id, "⚠️ 暂无增量数据，请等待定时分析完成")
+                    if result:
+                        result['header_comment'] = f"📊 基于 {self.window_hours} 小时窗口的群聊日报"
+                        report_path = await self._generate_report(group_id, result, [], False, 0, 0)
+                        await self._send_report(group_id, report_path)
+                        self._update_cooldown(group_id)
                         return True
-                    result['header_comment'] = f"📊 基于 {self.window_hours} 小时窗口的群聊日报"
-                    report_path = await self._generate_report(group_id, result, [], False, 0, 0)
-                    await self._send_report(group_id, report_path)
-                    self._update_cooldown(group_id)
-                    return True
+                    else:
+                        self._log(f"增量模式无批次数据，回退到传统全量分析")
 
+                # ============================================================
+                # 2. 传统全量分析（作为回退方案，也用于非增量群）
+                # ============================================================
                 messages = await self.db.get_messages(group_id, int(time.time()) - self.analysis_days * 86400)
                 total_msgs = len(messages)
                 if total_msgs < self.min_messages_threshold:
