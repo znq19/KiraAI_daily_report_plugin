@@ -1,9 +1,14 @@
 import asyncio
 import sys
+import random
 from pathlib import Path
 from typing import Optional
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from playwright.async_api import async_playwright
+
+
+# 可用主题列表
+AVAILABLE_THEMES = ["warm", "sakura", "clover", "diamond", "sky"]
 
 
 async def find_or_install_browser(prefer_system: bool = True):
@@ -98,9 +103,20 @@ class HTMLRenderer:
         finally:
             self._browser_ready.set()
     
-    def render_template(self, **kwargs) -> str:
+    def render_template(self, theme: str = "warm", **kwargs) -> str:
+        """
+        渲染日报模板
+        :param theme: 主题名，可选 warm/sakura/clover/diamond/sky/random
+        :param kwargs: 模板变量
+        """
+        # 处理随机主题
+        if theme == "random":
+            theme = random.choice(AVAILABLE_THEMES)
+        elif theme not in AVAILABLE_THEMES:
+            theme = "warm"
+        
         template = self.jinja_env.get_template("daily_report.html")
-        return template.render(**kwargs)
+        return template.render(theme=theme, **kwargs)
     
     async def render_to_image(self, html_content: str, output_path: str) -> bool:
         await self._browser_ready.wait()
