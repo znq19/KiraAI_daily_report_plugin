@@ -12,20 +12,16 @@ class DatabaseManager:
         self._conn: Optional[aiosqlite.Connection] = None
     
     async def init(self):
-        """初始化连接"""
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self.db_path)
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
     
     async def close(self):
-        """关闭连接"""
         if self._conn:
             await self._conn.close()
     
     async def create_tables(self):
-        """创建所有表"""
-        # 消息表
         await self._conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,7 +42,6 @@ class DatabaseManager:
             ON messages(timestamp)
         """)
         
-        # 增量分析批次表
         await self._conn.execute("""
             CREATE TABLE IF NOT EXISTS incremental_batches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,7 +62,6 @@ class DatabaseManager:
             ON incremental_batches(session_id, start_timestamp)
         """)
         
-        # 增量分析状态表（记录每个群的上次分析时间）
         await self._conn.execute("""
             CREATE TABLE IF NOT EXISTS incremental_state (
                 session_id TEXT PRIMARY KEY,
@@ -84,30 +78,35 @@ class DatabaseManager:
     
     async def save_message(self, session_id: str, user_id: str, nickname: str, 
                           content: str, timestamp: int):
-        """保存消息"""
         await self._conn.execute(
             "INSERT INTO messages (session_id, user_id, nickname, content, timestamp) VALUES (?, ?, ?, ?, ?)",
             (session_id, user_id, nickname, content, timestamp)
         )
         await self._conn.commit()
     
-    async def get_messages(self, session_id: str, since_timestamp: int, limit: int = 500) -> List[dict]:
-        """获取消息（按时间正序）"""
-        cursor = await self._conn.execute(
-            "SELECT user_id, nickname, content, timestamp FROM messages "
-            "WHERE session_id = ? AND timestamp >= ? "
-            "ORDER BY timestamp DESC LIMIT ?",
-            (session_id, since_timestamp, limit)
-        )
+    async def get_messages(self, session_id: str, since_timestamp: int, limit: int = None) -> List[dict]:
+        """获取消息，limit=None 时返回全部（按时间正序）"""
+        if limit is not None:
+            cursor = await self._conn.execute(
+                "SELECT user_id, nickname, content, timestamp FROM messages "
+                "WHERE session_id = ? AND timestamp >= ? "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (session_id, since_timestamp, limit)
+            )
+        else:
+            cursor = await self._conn.execute(
+                "SELECT user_id, nickname, content, timestamp FROM messages "
+                "WHERE session_id = ? AND timestamp >= ? "
+                "ORDER BY timestamp DESC",
+                (session_id, since_timestamp)
+            )
         rows = await cursor.fetchall()
-        # 反转成正序
         return [
             {"user_id": r[0], "nickname": r[1], "content": r[2], "timestamp": r[3]}
             for r in rows[::-1]
         ]
     
     async def get_messages_since(self, session_id: str, since_timestamp: int) -> List[dict]:
-        """获取指定时间之后的所有消息（不限量，用于增量分析）"""
         cursor = await self._conn.execute(
             "SELECT user_id, nickname, content, timestamp FROM messages "
             "WHERE session_id = ? AND timestamp > ? "
@@ -121,7 +120,6 @@ class DatabaseManager:
         ]
     
     async def get_all_groups(self) -> List[str]:
-        """获取所有出现过消息的群"""
         cursor = await self._conn.execute(
             "SELECT DISTINCT session_id FROM messages WHERE session_id LIKE 'qq:gm:%'"
         )
@@ -129,7 +127,6 @@ class DatabaseManager:
         return [r[0] for r in rows]
     
     async def delete_old_messages(self, before_timestamp: int):
-        """删除旧消息"""
         await self._conn.execute(
             "DELETE FROM messages WHERE timestamp < ?",
             (before_timestamp,)
@@ -141,7 +138,6 @@ class DatabaseManager:
     # ============================================================
     
     async def get_last_incremental_time(self, session_id: str) -> int:
-        """获取上次增量分析的时间戳"""
         cursor = await self._conn.execute(
             "SELECT last_timestamp FROM incremental_state WHERE session_id = ?",
             (session_id,)
@@ -152,7 +148,6 @@ class DatabaseManager:
         return 0
     
     async def update_last_incremental_time(self, session_id: str, timestamp: int):
-        """更新上次增量分析的时间戳"""
         await self._conn.execute(
             "INSERT OR REPLACE INTO incremental_state (session_id, last_timestamp, updated_at) VALUES (?, ?, ?)",
             (session_id, timestamp, int(time.time()))
@@ -175,7 +170,6 @@ class DatabaseManager:
         active_users: List[dict],
         sharp_comment: str = ''
     ):
-        """保存增量分析批次"""
         await self._conn.execute(
             """
             INSERT INTO incremental_batches (
@@ -199,7 +193,6 @@ class DatabaseManager:
         await self._conn.commit()
     
     async def get_incremental_batches(self, session_id: str, since_timestamp: int) -> List[dict]:
-        """获取指定时间之后的增量批次（按时间正序）"""
         cursor = await self._conn.execute(
             """
             SELECT id, start_timestamp, end_timestamp, message_count, participants,
@@ -228,7 +221,6 @@ class DatabaseManager:
         ]
     
     async def delete_old_batches(self, before_timestamp: int):
-        """删除旧的增量批次"""
         await self._conn.execute(
             "DELETE FROM incremental_batches WHERE created_at < ?",
             (before_timestamp,)
