@@ -327,7 +327,8 @@ kira_daily_report/
 
 ---
 
-## 📝 更新日志
+<details>
+<summary><b>📝 更新日志（点击展开）</b></summary>
 
 ### v1.2.5 (2026-06-27) — 重大更新 🚀
 
@@ -377,6 +378,8 @@ kira_daily_report/
 - ✨ LLM 智能分析（话题提取、金句识别、活跃用户统计）
 - ✨ AI 锐评 + 人设风格注入
 - ✨ 暖黄手账风 HTML 模板
+
+</details>
 
 ---
 
