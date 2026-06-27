@@ -94,7 +94,6 @@ class KiraDailyReport(BasePlugin):
         self.incremental_interval_minutes = incremental.get("incremental_interval_minutes", 120)
         self.incremental_min_messages = incremental.get("incremental_min_messages", 10)
         self.window_hours = incremental.get("window_hours", 24)
-        self.max_incremental_batches = incremental.get("max_incremental_batches", 5)
 
         # ---- 权限与安全 ----
         permission = cfg.get("section_permission", {})
@@ -190,6 +189,7 @@ class KiraDailyReport(BasePlugin):
         else:
             self._log("自然语言触发已启用")
 
+        # 启动时清理过期数据
         await self._cleanup_old_reports()
         await self._cleanup_old_messages()
 
@@ -589,16 +589,13 @@ class KiraDailyReport(BasePlugin):
         if not messages:
             return "暂无消息"
 
-        # 提取所有时间戳并排序
         timestamps = sorted([msg['timestamp'] for msg in messages])
         n = len(timestamps)
 
-        # 只有1条消息：显示该时间点
         if n == 1:
             dt = datetime.fromtimestamp(timestamps[0])
             return f"{dt.strftime('%H:%M')}"
 
-        # 只有2条消息：显示这2条的时间范围
         if n == 2:
             start_dt = datetime.fromtimestamp(timestamps[0])
             end_dt = datetime.fromtimestamp(timestamps[1])
@@ -607,7 +604,6 @@ class KiraDailyReport(BasePlugin):
             else:
                 return f"{start_dt.strftime('%m-%d %H:%M')}-{end_dt.strftime('%m-%d %H:%M')}"
 
-        # ---- 3条消息以上：滑动窗口算法 ----
         window_seconds = self.peak_window_minutes * 60
         total_span = timestamps[-1] - timestamps[0]
 
@@ -627,19 +623,13 @@ class KiraDailyReport(BasePlugin):
                 best_start_idx = i
                 best_end_idx = j
 
-        # ---- 判断是否属于"均匀分布"（无明显峰值） ----
-        # 如果最佳窗口的消息数占比低于 35%，或者最佳窗口跨度占了总跨度的 80% 以上
         if (best_count / n < 0.35) or (best_count > 0 and (timestamps[best_end_idx] - timestamps[best_start_idx]) / max(total_span, 1) > 0.8):
-            # 回退到全局范围，但限制最大显示 3 小时
-            max_display_seconds = 3 * 3600  # 3 小时
+            max_display_seconds = 3 * 3600
             if total_span <= max_display_seconds:
-                # 全局范围不大，直接显示全局
                 start_ts = timestamps[0]
                 end_ts = timestamps[-1]
             else:
-                # 全局范围太大，取最近 3 小时的消息
                 cutoff_ts = timestamps[-1] - max_display_seconds
-                # 找到 cutoff_ts 之后的第一个消息索引
                 for idx in range(n):
                     if timestamps[idx] >= cutoff_ts:
                         start_ts = timestamps[idx]
@@ -648,8 +638,6 @@ class KiraDailyReport(BasePlugin):
                     start_ts = timestamps[0]
                 end_ts = timestamps[-1]
         else:
-            # 有明显峰值，使用最佳窗口
-            # 进一步收缩：在最佳窗口内，找到包含至少 80% 消息的最短子区间
             sub_window = window_seconds * 0.5
             sub_best_start = best_start_idx
             sub_best_end = best_end_idx
@@ -665,7 +653,6 @@ class KiraDailyReport(BasePlugin):
                     sub_best_count = count
                     sub_best_start = i
                     sub_best_end = sub_j
-            # 如果收缩后的子区间保留了原窗口至少 70% 的消息，使用收缩结果
             if sub_best_count >= best_count * 0.7:
                 start_ts = timestamps[sub_best_start]
                 end_ts = timestamps[sub_best_end]
@@ -673,84 +660,159 @@ class KiraDailyReport(BasePlugin):
                 start_ts = timestamps[best_start_idx]
                 end_ts = timestamps[best_end_idx]
 
-        # 格式化输出
         start_dt = datetime.fromtimestamp(start_ts)
         end_dt = datetime.fromtimestamp(end_ts)
 
-        # 如果开始和结束在同一天，只显示时间
         if start_dt.date() == end_dt.date():
             return f"{start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}"
         else:
-            # 跨天情况，显示日期+时间
             return f"{start_dt.strftime('%m-%d %H:%M')}-{end_dt.strftime('%m-%d %H:%M')}"
 
     # ============================================================
-    # 统一润色方法
+    # 金句 LLM 精选
     # ============================================================
 
-    async def _generate_final_commentary(
+    async def _rank_quotes_by_llm(self, candidates: List[dict], top_n: int) -> List[dict]:
+        """
+        让 LLM 从候选金句中按精彩程度排序，选出 Top N。
+        候选池由调用方控制大小（通常为 quote_max * 2）
+        """
+        if not candidates:
+            return []
+
+        if len(candidates) <= top_n:
+            return candidates[:top_n]
+
+        candidate_list = candidates[:20]
+        quote_text = "\n".join([
+            f"{i+1}. {q.get('text', '')} —— {q.get('sender', '未知')}"
+            for i, q in enumerate(candidate_list)
+        ])
+
+        prompt = f"""请从以下候选金句中，评选出最精彩、最有趣、最有代表性的 {top_n} 条金句。
+
+评选标准：
+- 优先选择幽默、犀利、能引起共鸣的句子
+- 优先选择能代表群聊氛围的句子
+- 按精彩程度从高到低排序
+
+候选金句：
+{quote_text}
+
+输出格式（严格 JSON 数组）：
+[
+  {{"text": "金句原文", "sender": "发送者（保持原格式，如 周武#123456）"}},
+  ...
+]
+"""
+
+        try:
+            result = await self._call_llm(prompt)
+            if isinstance(result, list) and result:
+                valid = [q for q in result if q.get('text') and q.get('sender')]
+                if valid:
+                    return valid[:top_n]
+        except Exception as e:
+            self._log(f"LLM 评选金句失败: {e}")
+
+        return candidates[:top_n]
+
+    # ============================================================
+    # ⭐ 统一润色方法（合并 3 次调用为 1 次）
+    # ============================================================
+
+    async def _generate_full_daily_with_llm(
         self,
-        topics: List[dict],
-        quotes: List[dict],
+        topic_candidates: List[dict],
+        quote_candidates: List[dict],
         active_users: List[dict],
         existing_sharp_comments: List[str] = None
-    ) -> tuple[str, str, Optional[dict]]:
-        context_parts = []
-        if topics:
-            topic_summary = "、".join([t.get('title', '') for t in topics[:3]])
-            context_parts.append(f"热门话题：{topic_summary}")
-        if quotes:
-            quote_list = [f'"{q.get("text", "")}"（{q.get("sender", "未知")}）' for q in quotes[:5]]
-            context_parts.append(f"候选金句：{'; '.join(quote_list)}")
-        if active_users:
-            user_summary = "、".join([u.get('name', '') for u in active_users[:3]])
-            context_parts.append(f"活跃用户：{user_summary}")
+    ) -> Optional[dict]:
+        """
+        一次性让 LLM 完成所有润色任务：
+        1. 话题精选 + 精炼（topic_max 条）
+        2. 金句精选（quote_max 条）
+        3. 最佳金句评选
+        4. header_comment（一句话总结）
+        5. sharp_comment（AI锐评）
+        """
+        # 构建候选池文本
+        topic_text = "\n".join([
+            f"{i+1}. {t.get('title', '')}：{t.get('detail', '')}"
+            for i, t in enumerate(topic_candidates[:20])
+        ]) if topic_candidates else "无候选话题"
 
-        context = "\n".join(context_parts) if context_parts else "今日群聊暂无突出内容"
+        quote_text = "\n".join([
+            f"{i+1}. {q.get('text', '')} —— {q.get('sender', '未知')}"
+            for i, q in enumerate(quote_candidates[:20])
+        ]) if quote_candidates else "无候选金句"
+
+        user_text = "、".join([u.get('name', '') for u in active_users[:5]]) if active_users else "暂无活跃用户"
 
         sharp_ref = ""
         if existing_sharp_comments:
-            latest_sharp = existing_sharp_comments[-1]
-            sharp_ref = f"\n历史锐评风格参考（仅作风格参考，不要照抄）：{latest_sharp}"
+            sharp_ref = f"\n历史锐评风格参考（仅作风格参考，不要照抄）：{existing_sharp_comments[-1]}"
 
-        prompt = f"""根据以下群聊汇总信息，完成三项任务：
+        # 构建人设风格提示
+        persona_prompt = ""
+        if self.inject_persona:
+            try:
+                if self.persona_id and self.persona_id != "default":
+                    persona = await self.ctx.persona_mgr.get_persona(self.persona_id)
+                else:
+                    personas = await self.ctx.persona_mgr.list_personas()
+                    persona = personas[0] if personas else None
+                if persona:
+                    persona_prompt = f"\n请以以下人设风格进行点评和吐槽：\n{persona.content}\n"
+            except Exception as e:
+                self._log(f"获取人设失败: {e}")
 
-1. 生成一句简短有趣的一句话总结（header），不超过20字，不带表情符号。
-2. 生成一句毒舌/幽默的 AI 锐评（sharp），不超过30字，贴合群聊氛围。
-3. 从「候选金句」中评选出最佳金句，并给出精炼的评选理由（不超过15字）。
+        prompt = f"""你是一个群聊日报精炼师。请根据以下群聊汇总信息，完成五项任务。
+
+{persona_prompt}
+
+【候选话题】（需选出 {self.topic_max} 个最具代表性的，可合并/修改标题/补充描述）：
+{topic_text}
+
+【候选金句】（需选出 {self.quote_max} 条最精彩的）：
+{quote_text}
+
+【活跃用户】：{user_text}
 {sharp_ref}
 
-汇总信息：
-{context}
+【任务】
+1. 话题精选：从候选话题中选出 {self.topic_max} 个最具代表性的。如果两个话题相似，合并成一个更完整的话题，并更新标题和描述。每个话题附带一句 AI 吐槽。
+2. 金句精选：从候选金句中选出 {self.quote_max} 条最精彩的。
+3. 最佳金句：从选出的金句中评选一条为"最佳金句"，给出精炼的评选理由（不超过15字）。
+4. 一句话总结：用一句简短有趣的话概括今日群聊氛围，不超过20字，不带表情符号。
+5. AI锐评：用一句毒舌/幽默的话锐评今日群聊，不超过30字。
 
-请严格按以下 JSON 格式输出：
+【输出格式】（严格 JSON）：
 {{
-  "header_comment": "...",
-  "sharp_comment": "...",
+  "topics": [
+    {{"title": "话题标题", "detail": "话题描述", "roast": "AI吐槽"}}
+  ],
+  "quotes": [
+    {{"text": "金句原文", "sender": "发送者（保持 #QQ号 格式）"}}
+  ],
   "best_quote": {{
     "text": "最佳金句原文",
-    "sender": "发送者（必须保持完整格式，如 周武#123456）",
+    "sender": "发送者",
     "reason": "评选理由"
-  }}
+  }},
+  "header_comment": "一句话总结",
+  "sharp_comment": "AI锐评"
 }}
 """
 
         try:
             result = await self._call_llm(prompt)
             if isinstance(result, dict):
-                header = result.get("header_comment", "今日群聊，热闹非凡").strip()
-                sharp = result.get("sharp_comment", "").strip()
-                best = result.get("best_quote")
-                if best and isinstance(best, dict) and best.get('text') and best.get('sender'):
-                    return header, sharp, best
-                if quotes:
-                    return header, sharp, quotes[0]
-                return header, sharp, None
+                return result
         except Exception as e:
-            self._log(f"生成最终评论失败: {e}")
+            self._log(f"LLM 统一生成失败: {e}")
 
-        default_best = quotes[0] if quotes else None
-        return "今日群聊，热闹非凡", "", default_best
+        return None
 
     # ============================================================
     # 全量分析 Prompt
@@ -848,14 +910,12 @@ class KiraDailyReport(BasePlugin):
 【要求】
 1. 提取 2-3 个话题（标题+简短描述+AI吐槽）
 2. 提取 2-3 条金句（发言内容+发送者，`sender` 字段必须使用 `名字#QQ号` 格式）
-3. 列出发言最多的 {self.active_users_max} 位用户及发言数，`name` 字段必须使用 `名字#QQ号` 格式
-4. 一句话锐评
+3. 一句话锐评
 
 【输出格式】（严格JSON）
 {{
   "topics": [{{"title": "...", "detail": "...", "roast": "..."}}],
   "quotes": [{{"text": "...", "sender": "周武#123456"}}],
-  "active_users": [{{"name": "周武#123456", "count": 0}}],
   "sharp_comment": "..."
 }}
 
@@ -875,8 +935,13 @@ class KiraDailyReport(BasePlugin):
                 last_time = int(time.time()) - self.window_hours * 3600
 
             messages = await self.db.get_messages_since(group_id, last_time)
+            if not messages:
+                self._log(f"增量分析跳过：群 {group_id} 无新增消息")
+                return False
+
             if len(messages) < self.incremental_min_messages:
                 self._log(f"增量分析跳过：群 {group_id} 新增消息不足 {self.incremental_min_messages} 条")
+                await self.db.update_last_incremental_time(group_id, messages[-1]['timestamp'])
                 return False
 
             if len(messages) > self.max_messages_per_analysis:
@@ -896,6 +961,7 @@ class KiraDailyReport(BasePlugin):
                 filtered_quotes.append(q)
             result['quotes'] = filtered_quotes
 
+            # 增量批次中不再保存 active_users
             await self.db.save_incremental_batch(
                 session_id=group_id,
                 start_timestamp=last_time,
@@ -904,97 +970,290 @@ class KiraDailyReport(BasePlugin):
                 participants=len(set(m['user_id'] for m in messages)),
                 topics=result.get('topics', []),
                 quotes=result.get('quotes', []),
-                active_users=result.get('active_users', []),
+                active_users=[],
                 sharp_comment=result.get('sharp_comment', '')
             )
 
             await self.db.update_last_incremental_time(group_id, messages[-1]['timestamp'])
-            self._log(f"增量分析成功：群 {group_id}，{len(messages)} 条消息")
+
+            await self._merge_with_cumulative(group_id)
+
+            self._log(f"增量分析成功：群 {group_id}，{len(messages)} 条消息，已合并到累积结果")
             return True
         except Exception as e:
             logger.error(f"[KiraDaily] 增量分析失败 {group_id}: {e}")
             return False
 
     # ============================================================
-    # 增量批次合并
+    # 累积结果管理
     # ============================================================
 
-    async def _merge_batches(self, group_id: str, max_batches: int = None) -> Optional[dict]:
-        """
-        合并增量批次
-        :param group_id: 群会话ID
-        :param max_batches: 最多使用最近多少个批次，None 表示不限制（全量）
-        """
+    async def _get_cumulative(self, group_id: str) -> Optional[dict]:
+        return await self.db.get_cumulative_result(group_id)
+
+    async def _save_cumulative(
+        self,
+        group_id: str,
+        topics: List[dict],
+        quotes: List[dict],
+        active_users: List[dict],
+        topic_counts: dict,
+        user_counts: dict,
+        total_messages: int,
+        participants: int,
+        last_batch_timestamp: int,
+        merged_batch_count: int
+    ):
+        await self.db.save_cumulative_result(
+            group_id, topics, quotes, active_users, topic_counts,
+            user_counts, total_messages, participants, last_batch_timestamp, merged_batch_count
+        )
+
+    async def _delete_cumulative(self, group_id: str):
+        await self.db.delete_cumulative_result(group_id)
+
+    async def _is_cross_day(self, group_id: str) -> bool:
+        cumulative = await self._get_cumulative(group_id)
+        if not cumulative:
+            return True
+        last_ts = cumulative.get('last_batch_timestamp', 0)
+        if last_ts == 0:
+            return True
+        return (time.time() - last_ts) > self.window_hours * 3600
+
+    async def _build_cumulative_from_batches(self, group_id: str) -> bool:
         cutoff = int(time.time()) - self.window_hours * 3600
         batches = await self.db.get_incremental_batches(group_id, cutoff)
         if not batches:
-            return None
+            await self._delete_cumulative(group_id)
+            self._log(f"重建累积结果：群 {group_id} 窗口内无批次，已删除累积结果")
+            return False
 
-        if max_batches is not None and len(batches) > max_batches:
-            batches = batches[-max_batches:]
-            self._log(f"批次合并：使用最近 {len(batches)} 个批次")
-
-        total_messages = sum(b['message_count'] for b in batches)
-        all_users = {}
-        all_topics = []
-        all_quotes = []
-        all_sharp_comments = []
+        topic_counts: Dict[str, int] = {}
+        topic_meta: Dict[str, dict] = {}
+        quote_counts: Dict[str, int] = {}
+        quote_meta: Dict[str, dict] = {}
+        user_counts: Dict[str, int] = {}
+        total_messages = 0
+        last_batch_ts = 0
 
         for batch in batches:
             try:
                 topics = json.loads(batch['topics_json'])
                 quotes = json.loads(batch['quotes_json'])
+
+                total_messages += batch.get('message_count', 0)
+                last_batch_ts = max(last_batch_ts, batch.get('end_timestamp', 0))
+
+                for topic in topics:
+                    title = topic.get('title', '')
+                    if title:
+                        topic_counts[title] = topic_counts.get(title, 0) + 1
+                        if title not in topic_meta:
+                            topic_meta[title] = topic
+
+                for quote in quotes:
+                    text = quote.get('text', '')
+                    if text:
+                        quote_counts[text] = quote_counts.get(text, 0) + 1
+                        if text not in quote_meta:
+                            quote_meta[text] = quote
+
                 users = json.loads(batch['active_users_json'])
-                for u in users:
-                    name_tag = u.get('name', '')
-                    _, uid = parse_user_tag(name_tag)
-                    if uid:
-                        all_users[uid] = all_users.get(uid, 0) + u.get('count', 0)
-                    else:
-                        all_users[name_tag] = all_users.get(name_tag, 0) + u.get('count', 0)
-                all_topics.extend(topics)
-                all_quotes.extend(quotes)
-                if batch.get('sharp_comment'):
-                    all_sharp_comments.append(batch['sharp_comment'])
+                for user in users:
+                    name = user.get('name', '')
+                    if name:
+                        user_counts[name] = user_counts.get(name, 0) + user.get('count', 0)
+
             except Exception as e:
                 self._log(f"解析批次失败: {e}")
 
-        seen_titles = set()
-        unique_topics = []
-        for topic in all_topics:
-            if topic.get('title') and topic['title'] not in seen_titles:
-                seen_titles.add(topic['title'])
-                unique_topics.append(topic)
+        if not topic_meta and not quote_meta and not user_counts:
+            self._log(f"重建累积结果：群 {group_id} 无有效数据")
+            return False
 
-        seen_texts = set()
-        unique_quotes = []
-        for quote in all_quotes:
-            if quote.get('text') and quote['text'] not in seen_texts:
-                seen_texts.add(quote['text'])
-                unique_quotes.append(quote)
+        # 话题候选池
+        topic_candidates = list(topic_meta.values())
+        # 金句候选池
+        quote_candidates = list(quote_meta.values())
 
-        sorted_users = sorted(all_users.items(), key=lambda x: x[1], reverse=True)
-        top_users = []
-        for key, count in sorted_users[:self.active_users_max]:
-            nickname = await self._get_nickname_by_user_id(group_id, key)
-            top_users.append({
-                'name': f"{nickname}#{key}",
-                'count': count
-            })
+        # 活跃用户
+        sorted_users = sorted(
+            [{"name": k, "count": v} for k, v in user_counts.items()],
+            key=lambda x: x.get('count', 0),
+            reverse=True
+        )[:self.active_users_max]
 
-        return {
-            'stats': {
-                'total_messages': total_messages,
-                'participants': len(all_users),
-                'peak_hour': '00:00-23:59'
-            },
-            'topics': unique_topics[:self.topic_max],
-            'active_users': top_users,
-            'quotes': unique_quotes[:self.quote_max],
-            'best_quote': None,
-            'sharp_comment': all_sharp_comments[-1] if all_sharp_comments else '',
-            'header_comment': f"📊 基于 {len(batches)} 个时段汇总的群聊日报"
+        # 统一调用 LLM 生成
+        result = await self._generate_full_daily_with_llm(
+            topic_candidates=topic_candidates,
+            quote_candidates=quote_candidates,
+            active_users=sorted_users,
+            existing_sharp_comments=[]
+        )
+
+        if result:
+            topics = result.get('topics', [])[:self.topic_max]
+            quotes = result.get('quotes', [])[:self.quote_max]
+        else:
+            topics = topic_candidates[:self.topic_max]
+            quotes = quote_candidates[:self.quote_max]
+
+        await self._save_cumulative(
+            group_id,
+            topics,
+            quotes,
+            sorted_users,
+            topic_counts,
+            user_counts,
+            total_messages,
+            len(user_counts),
+            last_batch_ts,
+            len(batches)
+        )
+
+        self._log(f"重建累积结果：群 {group_id}，{len(batches)} 个批次，{total_messages} 条消息")
+        return True
+
+    async def _merge_with_cumulative(self, group_id: str) -> bool:
+        cumulative = await self._get_cumulative(group_id)
+        if not cumulative:
+            return await self._build_cumulative_from_batches(group_id)
+
+        last_ts = cumulative.get('last_batch_timestamp', 0)
+        cutoff = int(time.time()) - self.window_hours * 3600
+        all_batches = await self.db.get_incremental_batches(group_id, cutoff)
+        new_batches = [b for b in all_batches if b['start_timestamp'] > last_ts]
+
+        if not new_batches:
+            self._log(f"累积合并：群 {group_id} 无新批次")
+            return True
+
+        topic_counts = json.loads(cumulative.get('topic_counts_json', '{}'))
+        user_counts = json.loads(cumulative.get('user_counts_json', '{}'))
+        topics = json.loads(cumulative.get('topics_json', '[]'))
+        quotes = json.loads(cumulative.get('quotes_json', '[]'))
+        active_users = json.loads(cumulative.get('active_users_json', '[]'))
+        total_messages = cumulative.get('total_messages', 0)
+        participants = cumulative.get('participants', 0)
+        merged_batch_count = cumulative.get('merged_batch_count', 0)
+
+        topic_meta = {t.get('title'): t for t in topics if t.get('title')}
+        quote_meta = {q.get('text'): q for q in quotes if q.get('text')}
+        user_meta = {u.get('name'): u for u in active_users if u.get('name')}
+
+        last_batch_ts = cumulative.get('last_batch_timestamp', 0)
+
+        for batch in new_batches:
+            try:
+                batch_topics = json.loads(batch['topics_json'])
+                batch_quotes = json.loads(batch['quotes_json'])
+
+                total_messages += batch.get('message_count', 0)
+                last_batch_ts = max(last_batch_ts, batch.get('end_timestamp', 0))
+                merged_batch_count += 1
+
+                for topic in batch_topics:
+                    title = topic.get('title', '')
+                    if title:
+                        topic_counts[title] = topic_counts.get(title, 0) + 1
+                        if title not in topic_meta:
+                            topic_meta[title] = topic
+
+                for quote in batch_quotes:
+                    text = quote.get('text', '')
+                    if text:
+                        if text not in quote_meta:
+                            quote_meta[text] = quote
+
+                users = json.loads(batch['active_users_json'])
+                for user in users:
+                    name = user.get('name', '')
+                    if name:
+                        user_counts[name] = user_counts.get(name, 0) + user.get('count', 0)
+                        if name not in user_meta:
+                            user_meta[name] = user
+
+            except Exception as e:
+                self._log(f"合并批次失败: {e}")
+
+        # 构建话题候选池（按频次排序取前 topic_max * 2 条）
+        topic_candidates = sorted(
+            topic_meta.values(),
+            key=lambda t: topic_counts.get(t.get('title', ''), 0),
+            reverse=True
+        )[:self.topic_max * 2]
+
+        # 构建金句候选池（按频次排序取前 quote_max * 2 条）
+        quote_candidates = sorted(
+            quote_meta.values(),
+            key=lambda q: quote_counts.get(q.get('text', ''), 0),
+            reverse=True
+        )[:self.quote_max * 2]
+
+        # 活跃用户
+        sorted_users = sorted(
+            [{"name": k, "count": v} for k, v in user_counts.items()],
+            key=lambda x: x.get('count', 0),
+            reverse=True
+        )[:self.active_users_max]
+
+        # 收集历史锐评
+        existing_sharp_comments = []
+        sharp_comment = cumulative.get('sharp_comment', '')
+        if sharp_comment:
+            existing_sharp_comments.append(sharp_comment)
+
+        # ⭐ 统一调用 LLM 完成所有润色任务
+        result = await self._generate_full_daily_with_llm(
+            topic_candidates=topic_candidates,
+            quote_candidates=quote_candidates,
+            active_users=sorted_users,
+            existing_sharp_comments=existing_sharp_comments
+        )
+
+        if result:
+            topics = result.get('topics', [])[:self.topic_max]
+            quotes = result.get('quotes', [])[:self.quote_max]
+            # 如果 LLM 返回了最佳金句，从 quotes 中选取对应的
+            best_quote = result.get('best_quote')
+            # 更新累积结果的 sharp_comment
+            if result.get('sharp_comment'):
+                sharp_comment = result.get('sharp_comment')
+        else:
+            topics = topic_candidates[:self.topic_max]
+            quotes = quote_candidates[:self.quote_max]
+            best_quote = None
+
+        # 保存累积结果（包含 sharp_comment）
+        cumulative_data = {
+            'topics': topics,
+            'quotes': quotes,
+            'active_users': sorted_users,
+            'topic_counts': topic_counts,
+            'user_counts': user_counts,
+            'total_messages': total_messages,
+            'participants': len(user_counts),
+            'last_batch_timestamp': last_batch_ts,
+            'merged_batch_count': merged_batch_count,
+            'sharp_comment': sharp_comment
         }
+
+        await self._save_cumulative(
+            group_id,
+            cumulative_data['topics'],
+            cumulative_data['quotes'],
+            cumulative_data['active_users'],
+            cumulative_data['topic_counts'],
+            cumulative_data['user_counts'],
+            cumulative_data['total_messages'],
+            cumulative_data['participants'],
+            cumulative_data['last_batch_timestamp'],
+            cumulative_data['merged_batch_count']
+        )
+
+        self._log(f"累积合并：群 {group_id}，合并 {len(new_batches)} 个新批次，总计 {merged_batch_count} 个批次")
+        return True
 
     # ============================================================
     # 辅助方法
@@ -1018,8 +1277,10 @@ class KiraDailyReport(BasePlugin):
     # ============================================================
 
     async def _cleanup_old_messages(self):
+        """清理过期消息和批次，并联动清理累积结果"""
         now = int(time.time())
         try:
+            # 1. 清理过期消息
             if self.message_retention_days > 0:
                 before = now - self.message_retention_days * 86400
                 deleted = await self.db.delete_old_messages(before)
@@ -1028,15 +1289,65 @@ class KiraDailyReport(BasePlugin):
             else:
                 self._log("消息保留天数设为 0，永久保留")
 
+            # 2. 清理过期增量批次
             if self.batch_retention_days > 0:
                 before = now - self.batch_retention_days * 86400
                 deleted_batches = await self.db.delete_old_batches(before)
                 if deleted_batches:
                     self._log(f"清理了 {deleted_batches} 个过期增量批次（保留 {self.batch_retention_days} 天）")
+
+                    groups = await self.db.get_all_groups()
+                    deleted_cumulative_count = 0
+                    for group_id in groups:
+                        if await self._get_cumulative(group_id):
+                            await self._delete_cumulative(group_id)
+                            deleted_cumulative_count += 1
+                    if deleted_cumulative_count:
+                        self._log(f"删除了 {deleted_cumulative_count} 个累积结果（因批次清理，将在下次日报时自动重建）")
             else:
                 self._log("增量批次保留天数设为 0，永久保留")
+
         except Exception as e:
             logger.error(f"[KiraDaily] 清理过期数据失败: {e}")
+
+    async def _cleanup_old_reports(self):
+        """清理旧报告：每次删除最旧的 N 个过期报告（N = report_cleanup_count）"""
+        try:
+            files = list(self.reports_dir.glob("*.png")) + list(self.reports_dir.glob("*.html")) + list(self.reports_dir.glob("*.txt"))
+            if not files:
+                self._log("无报告需要清理")
+                return
+
+            files.sort(key=lambda f: f.stat().st_mtime)
+
+            if self.report_retention_days <= 0:
+                self._log(f"报告保留天数设为 0，永久保留")
+                return
+
+            cutoff_time = time.time() - self.report_retention_days * 86400
+            expired_files = [f for f in files if f.stat().st_mtime < cutoff_time]
+
+            if not expired_files:
+                self._log(f"无需清理：所有报告都在 {self.report_retention_days} 天内")
+                return
+
+            delete_count = min(len(expired_files), self.report_cleanup_count)
+            to_delete = expired_files[:delete_count]
+
+            if to_delete:
+                for f in to_delete:
+                    try:
+                        f.unlink(missing_ok=True)
+                        meta_path = f.with_suffix(".meta.json")
+                        meta_path.unlink(missing_ok=True)
+                    except Exception as e:
+                        self._log(f"删除旧报告失败 {f}: {e}")
+                self._log(f"清理了 {len(to_delete)} 个旧报告（共 {len(expired_files)} 个过期，本次删除 {len(to_delete)} 个）")
+            else:
+                self._log(f"无需清理：没有过期报告")
+
+        except Exception as e:
+            logger.error(f"[KiraDaily] 清理报告失败: {e}")
 
     # ============================================================
     # 安全执行分析
@@ -1069,37 +1380,39 @@ class KiraDailyReport(BasePlugin):
         async with self._semaphore:
             try:
                 if self._is_incremental_group(group_id):
-                    self._log(f"增量模式：合并群 {group_id} 的批次并补充新消息")
+                    self._log(f"增量模式：群 {group_id} 使用累积结果生成日报")
 
-                    # ⭐ 1. 获取窗口内全部消息（无限制）
+                    # 1. 检查跨天
+                    if await self._is_cross_day(group_id):
+                        self._log(f"增量模式：群 {group_id} 跨天，重建累积结果")
+                        await self._build_cumulative_from_batches(group_id)
+
+                    # 2. 获取窗口内原始消息（用于统计数字）
                     window_start_ts = int(time.time()) - self.window_hours * 3600
                     all_window_msgs = await self.db.get_messages(group_id, window_start_ts, limit=None)
+
                     total_messages = len(all_window_msgs)
-
-                    # ⭐ 2. 统计真实参与人数
                     participants_count = len(set(m['user_id'] for m in all_window_msgs))
-
-                    # ⭐ 3. 计算真实消息时间范围
-                    if all_window_msgs:
-                        actual_start_ts = all_window_msgs[0]['timestamp']
-                        actual_end_ts = all_window_msgs[-1]['timestamp']
-                    else:
-                        actual_start_ts = window_start_ts
-                        actual_end_ts = int(time.time())
-
-                    # ⭐ 4. 计算活跃时段（使用统一精确算法）
                     peak_hour = self._calculate_peak_hour(all_window_msgs)
+                    self._log(f"实时统计：总消息数 {total_messages}，参与人数 {participants_count}，活跃时段 {peak_hour}")
 
-                    # ⭐ 5. 直接从原始消息统计活跃用户（准确、完整、零Token消耗）
+                    # 3. 获取累积结果
+                    cumulative = await self._get_cumulative(group_id)
+                    if not cumulative:
+                        self._log(f"增量模式：群 {group_id} 无累积结果，回退到全量分析")
+                        return await self._do_full_analysis(group_id, user_id)
+
+                    # 4. 从累积结果提取话题、金句
+                    topics = json.loads(cumulative.get('topics_json', '[]'))
+                    quotes = json.loads(cumulative.get('quotes_json', '[]'))
+
+                    # 5. 活跃用户直接从原始消息统计
                     user_msg_counts: Dict[str, int] = defaultdict(int)
                     user_nickname_map: Dict[str, str] = {}
 
                     for msg in all_window_msgs:
                         uid = msg.get('user_id', '')
-                        if not uid:
-                            continue
-                        # 过滤 Bot 自己的消息
-                        if uid == self._bot_self_id:
+                        if not uid or uid == self._bot_self_id:
                             continue
                         user_msg_counts[uid] += 1
                         if msg.get('nickname'):
@@ -1121,122 +1434,60 @@ class KiraDailyReport(BasePlugin):
 
                     self._log(f"活跃用户统计：从 {total_messages} 条消息中统计出 {len(active_users_from_db)} 位活跃用户")
 
-                    # 6. 获取已有批次数据并聚合（只取最近的 max_incremental_batches 个批次）
-                    existing_result = await self._merge_batches(group_id, max_batches=self.max_incremental_batches)
-                    topic_counts: Dict[str, int] = {}
-                    topic_meta: Dict[str, dict] = {}
-                    quote_counts: Dict[str, int] = {}
-                    quote_meta: Dict[str, dict] = {}
-                    all_sharp_comments: List[str] = []
-
-                    if existing_result:
-                        for topic in existing_result.get('topics', []):
-                            title = topic.get('title', '')
-                            if not title:
-                                continue
-                            topic_counts[title] = topic_counts.get(title, 0) + 1
-                            if title not in topic_meta:
-                                topic_meta[title] = topic
-                        for quote in existing_result.get('quotes', []):
-                            text = quote.get('text', '')
-                            if not text:
-                                continue
-                            quote_counts[text] = quote_counts.get(text, 0) + 1
-                            if text not in quote_meta:
-                                quote_meta[text] = quote
-                        if existing_result.get('sharp_comment'):
-                            all_sharp_comments.append(existing_result['sharp_comment'])
-
-                    # 7. 获取上次增量分析的时间点，拉取新消息
-                    last_time = await self.db.get_last_incremental_time(group_id)
-                    if last_time == 0:
-                        self._log(f"增量模式：从未执行过增量分析，回退到全量分析")
-                        return await self._do_full_analysis(group_id, user_id)
-
-                    raw_new_messages = await self.db.get_messages_since(group_id, last_time)
-                    truncated = False
-                    new_messages = raw_new_messages
-                    if len(raw_new_messages) > self.max_messages_per_analysis:
-                        new_messages = raw_new_messages[-self.max_messages_per_analysis:]
-                        truncated = True
-                        self._log(f"增量模式：新增消息 {len(raw_new_messages)} 条，截断至 {len(new_messages)} 条进行分析")
-
-                    # 8. 新增消息分析
-                    if new_messages:
-                        incremental_result = await self._call_llm_incremental(new_messages)
-                        if incremental_result:
-                            for topic in incremental_result.get('topics', []):
-                                title = topic.get('title', '')
-                                if not title:
-                                    continue
-                                topic_counts[title] = topic_counts.get(title, 0) + 1
-                                if title not in topic_meta:
-                                    topic_meta[title] = topic
-                            for quote in incremental_result.get('quotes', []):
-                                text = quote.get('text', '')
-                                if not text:
-                                    continue
-                                quote_counts[text] = quote_counts.get(text, 0) + 1
-                                if text not in quote_meta:
-                                    quote_meta[text] = quote
-                            if incremental_result.get('sharp_comment'):
-                                all_sharp_comments.append(incremental_result['sharp_comment'])
-
-                            await self.db.save_incremental_batch(
-                                session_id=group_id,
-                                start_timestamp=last_time,
-                                end_timestamp=new_messages[-1]['timestamp'],
-                                message_count=len(new_messages),
-                                participants=len(set(m['user_id'] for m in new_messages)),
-                                topics=incremental_result.get('topics', []),
-                                quotes=incremental_result.get('quotes', []),
-                                active_users=incremental_result.get('active_users', []),
-                                sharp_comment=incremental_result.get('sharp_comment', '')
-                            )
-                            await self.db.update_last_incremental_time(group_id, new_messages[-1]['timestamp'])
-
-                    # 9. 按频次排序话题和金句
-                    sorted_topics = sorted(
-                        topic_meta.values(),
-                        key=lambda t: topic_counts.get(t.get('title', ''), 0),
-                        reverse=True
-                    )[:self.topic_max]
-
-                    sorted_quotes = sorted(
-                        quote_meta.values(),
-                        key=lambda q: quote_counts.get(q.get('text', ''), 0),
-                        reverse=True
-                    )[:self.quote_max]
-
-                    # 10. 回退检查
-                    if not sorted_topics and not sorted_quotes and not active_users_from_db:
+                    # 6. 回退检查
+                    if not topics and not quotes and not active_users_from_db:
                         self._log(f"增量模式：合并后仍无数据，回退到全量分析")
                         return await self._do_full_analysis(group_id, user_id)
 
-                    # 11. 统一润色
-                    header_comment, sharp_comment, best_quote = await self._generate_final_commentary(
-                        topics=sorted_topics,
-                        quotes=sorted_quotes,
-                        active_users=active_users_from_db,
-                        existing_sharp_comments=all_sharp_comments
-                    )
+                    # 7. 组装最终结果
+                    # 从累积结果中提取已有数据
+                    sharp_comment = cumulative.get('sharp_comment', '')
+                    header_comment = cumulative.get('header_comment', '')
 
-                    # 12. 组装最终结果
+                    # 如果累积结果中没有 header_comment 和 sharp_comment，需要重新生成
+                    if not header_comment or not sharp_comment:
+                        # 调用统一润色（但此时可能没有候选池，只能从已有数据生成）
+                        result = await self._generate_full_daily_with_llm(
+                            topic_candidates=topics,
+                            quote_candidates=quotes,
+                            active_users=active_users_from_db,
+                            existing_sharp_comments=[sharp_comment] if sharp_comment else []
+                        )
+                        if result:
+                            topics = result.get('topics', topics)
+                            quotes = result.get('quotes', quotes)
+                            best_quote = result.get('best_quote')
+                            header_comment = result.get('header_comment', header_comment)
+                            sharp_comment = result.get('sharp_comment', sharp_comment)
+                        else:
+                            best_quote = quotes[0] if quotes else None
+                    else:
+                        # 已有完整数据，直接使用
+                        best_quote = quotes[0] if quotes else None
+
                     final_result = {
                         'stats': {
                             'total_messages': total_messages,
                             'participants': participants_count,
                             'peak_hour': peak_hour
                         },
-                        'topics': sorted_topics,
+                        'topics': topics,
                         'active_users': active_users_from_db,
-                        'quotes': sorted_quotes,
+                        'quotes': quotes,
                         'best_quote': best_quote,
                         'sharp_comment': sharp_comment,
                         'header_comment': header_comment
                     }
 
-                    self._log(f"增量模式：合并完成，窗口总消息数 {total_messages}，参与人数 {participants_count}")
+                    self._log(f"增量模式：群 {group_id} 日报生成完成，总消息数 {total_messages}，参与人数 {participants_count}")
+
+                    # 生成报告
+                    if all_window_msgs:
+                        actual_start_ts = all_window_msgs[0]['timestamp']
+                        actual_end_ts = all_window_msgs[-1]['timestamp']
+                    else:
+                        actual_start_ts = window_start_ts
+                        actual_end_ts = int(time.time())
 
                     report_path = await self._generate_report(
                         group_id, final_result, [],
@@ -1303,7 +1554,6 @@ class KiraDailyReport(BasePlugin):
         stats = result.get('stats', {})
         stats['total_messages'] = total_msgs
         stats['participants'] = len(set(m['user_id'] for m in messages))
-        # ⭐ 覆盖 LLM 生成的 peak_hour，使用精确统计
         stats['peak_hour'] = self._calculate_peak_hour(messages)
         result['stats'] = stats
 
@@ -1566,7 +1816,7 @@ class KiraDailyReport(BasePlugin):
                 await asyncio.sleep(0.5)
 
     # ============================================================
-    # 定时任务
+    # 定时任务（每天执行清理 + 日报）
     # ============================================================
 
     async def _scheduler_loop(self):
@@ -1582,6 +1832,11 @@ class KiraDailyReport(BasePlugin):
                 await asyncio.sleep(wait_seconds)
                 if not self._running:
                     break
+
+                self._log("执行每日清理...")
+                await self._cleanup_old_messages()
+                await self._cleanup_old_reports()
+
                 await self._run_auto_analysis()
             except asyncio.CancelledError:
                 break
@@ -1591,7 +1846,6 @@ class KiraDailyReport(BasePlugin):
 
     async def _run_auto_analysis(self):
         self._log("开始执行自动日报分析")
-        await self._cleanup_old_messages()
 
         if self.auto_enabled_groups:
             groups = self.auto_enabled_groups
@@ -1646,7 +1900,7 @@ class KiraDailyReport(BasePlugin):
         self._log(f"增量分析完成: {success_count}/{len(groups)} 群成功")
 
     # ============================================================
-    # 命令处理
+    # 命令处理（手动触发）
     # ============================================================
 
     @on.im_message(priority=Priority.MEDIUM)
@@ -1686,12 +1940,15 @@ class KiraDailyReport(BasePlugin):
             session=self._get_sid(event),
             chain=MessageChain([Text(self.msg_processing)])
         )
+
+        await self._do_incremental_analysis(group_id)
         await self._do_analysis(group_id, user_id)
+
         event.discard(force=True)
         event.stop()
 
     # ============================================================
-    # LLM 工具
+    # LLM 工具（自然语言触发）
     # ============================================================
 
     @register_tool(
@@ -1734,29 +1991,8 @@ class KiraDailyReport(BasePlugin):
             self.analysis_days = original_days
             await self._send_text_to_group(group_id, self.msg_cooldown.format(remaining=remaining))
             return "✅ 冷却中，已向用户说明。"
+
+        await self._do_incremental_analysis(group_id)
         await self._do_analysis(group_id, user_id)
         self.analysis_days = original_days
         return "✅ 日报任务已完成处理，结果已发送到群聊。"
-
-    # ============================================================
-    # 清理旧报告
-    # ============================================================
-
-    async def _cleanup_old_reports(self):
-        try:
-            files = list(self.reports_dir.glob("*.png")) + list(self.reports_dir.glob("*.html")) + list(self.reports_dir.glob("*.txt"))
-            if not files:
-                return
-            files.sort(key=lambda f: f.stat().st_mtime)
-            if len(files) > self.report_cleanup_count:
-                to_delete = files[:self.report_cleanup_count]
-                for f in to_delete:
-                    try:
-                        f.unlink(missing_ok=True)
-                        meta_path = f.with_suffix(".meta.json")
-                        meta_path.unlink(missing_ok=True)
-                    except Exception as e:
-                        self._log(f"删除旧报告失败 {f}: {e}")
-                self._log(f"清理了 {len(to_delete)} 个旧报告")
-        except Exception as e:
-            logger.error(f"[KiraDaily] 清理报告失败: {e}")
