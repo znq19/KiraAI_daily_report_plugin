@@ -9,7 +9,7 @@
 ## ✨ 效果展示
 
 <div align="center">
-| <img src="demo.jpg" width="200"> |
+ <img src="demo.jpg"> 
 
 </div>
 
