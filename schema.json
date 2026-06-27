@@ -73,7 +73,7 @@
       "max_messages_per_analysis": {
         "type": "integer",
         "name": "单次最大分析消息数",
-        "default": 500,
+        "default": 1000,
         "minimum": 10,
         "maximum": 5000,
         "hint": "超过此数量将截断消息，防止Token消耗过大"
@@ -154,7 +154,7 @@
         "default": 3,
         "minimum": 0,
         "maximum": 10,
-        "hint": "日报中展示的金句数量（0=不展示）"
+        "hint": "日报中展示的金句数量（0=不展示）。候选池大小为 金句数量 × 2，由 LLM 动态精选"
       },
       "active_users_max": {
         "type": "integer",
@@ -176,7 +176,7 @@
         "type": "switch",
         "name": "启用增量分析模式",
         "default": false,
-        "hint": "适合日均消息 > 500 条的群，分批处理节省Token"
+        "hint": "适合日均消息 > 500 条的群。开启后，每次分析新增消息并累积到结果中，最终日报基于累积结果生成"
       },
       "incremental_group_list": {
         "type": "list",
@@ -212,15 +212,7 @@
         "default": 24,
         "minimum": 1,
         "maximum": 168,
-        "hint": "生成完整日报时合并最近多少小时的增量数据"
-      },
-      "max_incremental_batches": {
-        "type": "integer",
-        "name": "参与统计的最近批次数量",
-        "default": 5,
-        "minimum": 1,
-        "maximum": 20,
-        "hint": "生成日报时只统计最近的 N 个增量批次。值越小新话题上位越快，值越大旧话题越稳定。建议 3-8"
+        "hint": "控制日报覆盖的时间范围。窗口外的批次不会参与合并，旧数据自动滑出。建议 12-24"
       }
     }
   },
