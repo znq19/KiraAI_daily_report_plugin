@@ -293,7 +293,7 @@ class DatabaseManager:
         last_batch_timestamp: int,
         merged_batch_count: int
     ):
-        """保存或更新累积结果"""
+        """保存或更新累积结果（移除 quote_counts 参数）"""
         now = int(time.time())
         await self._conn.execute(
             """
