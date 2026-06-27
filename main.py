@@ -577,14 +577,14 @@ class KiraDailyReport(BasePlugin):
             return {}
 
     # ============================================================
-    # 活跃时段精确统计算法
+    # ⭐ 活跃时段精确统计算法（改进版：使用密度比判断）
     # ============================================================
 
     def _calculate_peak_hour(self, messages: List[dict]) -> str:
         """
         基于消息时间戳，计算最活跃的时间段。
-        使用滑动窗口找到消息最密集的时间区间，然后收缩到实际消息边界。
-        永不返回"未知"，总是返回一个合理的时间范围。
+        使用密度比（峰值密度 vs 平均密度）判断是否有显著峰值。
+        如果密度比 >= 1.5，输出峰值窗口；否则回退到最近窗口内的消息范围。
         """
         if not messages:
             return "暂无消息"
@@ -607,6 +607,7 @@ class KiraDailyReport(BasePlugin):
         window_seconds = self.peak_window_minutes * 60
         total_span = timestamps[-1] - timestamps[0]
 
+        # ---- 滑动窗口找消息数最多的窗口 ----
         best_start_idx = 0
         best_end_idx = 0
         best_count = 0
@@ -623,42 +624,65 @@ class KiraDailyReport(BasePlugin):
                 best_start_idx = i
                 best_end_idx = j
 
-        if (best_count / n < 0.35) or (best_count > 0 and (timestamps[best_end_idx] - timestamps[best_start_idx]) / max(total_span, 1) > 0.8):
-            max_display_seconds = 3 * 3600
-            if total_span <= max_display_seconds:
-                start_ts = timestamps[0]
-                end_ts = timestamps[-1]
+        # ---- 计算密度比，判断是否有显著峰值 ----
+        window_span = timestamps[best_end_idx] - timestamps[best_start_idx]
+        if window_span <= 0:
+            window_span = 60
+
+        avg_density = n / max(total_span, 1)
+        peak_density = best_count / window_span
+        density_ratio = peak_density / avg_density if avg_density > 0 else 1.0
+
+        # 密度比 < 1.5：无显著峰值，回退到最近窗口内的消息
+        if density_ratio < 1.5:
+            cutoff_ts = timestamps[-1] - window_seconds
+            start_idx = 0
+            for idx in range(n):
+                if timestamps[idx] >= cutoff_ts:
+                    start_idx = idx
+                    break
+            # 如果窗口内消息少于3条，取最近3条
+            if n - start_idx < 3:
+                start_idx = max(0, n - 3)
+            start_ts = timestamps[start_idx]
+            end_ts = timestamps[-1]
+
+            start_dt = datetime.fromtimestamp(start_ts)
+            end_dt = datetime.fromtimestamp(end_ts)
+            if start_dt.date() == end_dt.date():
+                return f"{start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}"
             else:
-                cutoff_ts = timestamps[-1] - max_display_seconds
-                for idx in range(n):
-                    if timestamps[idx] >= cutoff_ts:
-                        start_ts = timestamps[idx]
-                        break
-                else:
-                    start_ts = timestamps[0]
-                end_ts = timestamps[-1]
-        else:
-            sub_window = window_seconds * 0.5
-            sub_best_start = best_start_idx
-            sub_best_end = best_end_idx
-            sub_best_count = 0
-            sub_j = best_start_idx
-            for i in range(best_start_idx, best_end_idx + 1):
-                if sub_j < i:
-                    sub_j = i
-                while sub_j + 1 <= best_end_idx and timestamps[sub_j + 1] - timestamps[i] <= sub_window:
-                    sub_j += 1
-                count = sub_j - i + 1
-                if count > sub_best_count:
-                    sub_best_count = count
+                return f"{start_dt.strftime('%m-%d %H:%M')}-{end_dt.strftime('%m-%d %H:%M')}"
+
+        # ---- 有明显峰值，进一步收缩窗口 ----
+        sub_window = window_seconds * 0.5
+        sub_best_start = best_start_idx
+        sub_best_end = best_end_idx
+        sub_best_density = 0
+
+        sub_j = best_start_idx
+        for i in range(best_start_idx, best_end_idx + 1):
+            if sub_j < i:
+                sub_j = i
+            while sub_j + 1 <= best_end_idx and timestamps[sub_j + 1] - timestamps[i] <= sub_window:
+                sub_j += 1
+            count = sub_j - i + 1
+            if count >= 3:
+                sub_span = timestamps[sub_j] - timestamps[i]
+                if sub_span <= 0:
+                    sub_span = 60
+                density = count / sub_span
+                if density > sub_best_density:
+                    sub_best_density = density
                     sub_best_start = i
                     sub_best_end = sub_j
-            if sub_best_count >= best_count * 0.7:
-                start_ts = timestamps[sub_best_start]
-                end_ts = timestamps[sub_best_end]
-            else:
-                start_ts = timestamps[best_start_idx]
-                end_ts = timestamps[best_end_idx]
+
+        if sub_best_density > 0 and sub_best_density > peak_density * 0.8:
+            start_ts = timestamps[sub_best_start]
+            end_ts = timestamps[sub_best_end]
+        else:
+            start_ts = timestamps[best_start_idx]
+            end_ts = timestamps[best_end_idx]
 
         start_dt = datetime.fromtimestamp(start_ts)
         end_dt = datetime.fromtimestamp(end_ts)
@@ -925,10 +949,14 @@ class KiraDailyReport(BasePlugin):
         return await self._call_llm(prompt)
 
     # ============================================================
-    # 增量分析核心
+    # 增量分析核心（修复：无新消息/不足阈值视为正常，不触发回退）
     # ============================================================
 
     async def _do_incremental_analysis(self, group_id: str) -> bool:
+        """
+        执行增量分析，返回 True 表示处理成功（可能无新消息或已分析），
+        False 表示出现错误（如 LLM 调用失败）需要回退到全量。
+        """
         try:
             last_time = await self.db.get_last_incremental_time(group_id)
             if last_time == 0:
@@ -937,18 +965,19 @@ class KiraDailyReport(BasePlugin):
             messages = await self.db.get_messages_since(group_id, last_time)
             if not messages:
                 self._log(f"增量分析跳过：群 {group_id} 无新增消息")
-                return False
+                return True
 
             if len(messages) < self.incremental_min_messages:
                 self._log(f"增量分析跳过：群 {group_id} 新增消息不足 {self.incremental_min_messages} 条")
                 await self.db.update_last_incremental_time(group_id, messages[-1]['timestamp'])
-                return False
+                return True
 
             if len(messages) > self.max_messages_per_analysis:
                 messages = messages[-self.max_messages_per_analysis:]
 
             result = await self._call_llm_incremental(messages)
             if not result:
+                self._log(f"增量分析 LLM 返回空结果：群 {group_id}")
                 return False
 
             quotes = result.get('quotes', [])
@@ -961,7 +990,6 @@ class KiraDailyReport(BasePlugin):
                 filtered_quotes.append(q)
             result['quotes'] = filtered_quotes
 
-            # 增量批次中不再保存 active_users
             await self.db.save_incremental_batch(
                 session_id=group_id,
                 start_timestamp=last_time,
@@ -998,7 +1026,6 @@ class KiraDailyReport(BasePlugin):
         quotes: List[dict],
         active_users: List[dict],
         topic_counts: dict,
-        quote_counts: dict,
         user_counts: dict,
         total_messages: int,
         participants: int,
@@ -1007,7 +1034,7 @@ class KiraDailyReport(BasePlugin):
     ):
         await self.db.save_cumulative_result(
             group_id, topics, quotes, active_users, topic_counts,
-            quote_counts, user_counts, total_messages, participants,
+            user_counts, total_messages, participants,
             last_batch_timestamp, merged_batch_count
         )
 
@@ -1107,7 +1134,6 @@ class KiraDailyReport(BasePlugin):
             quotes,
             sorted_users,
             topic_counts,
-            quote_counts,
             user_counts,
             total_messages,
             len(user_counts),
@@ -1232,7 +1258,6 @@ class KiraDailyReport(BasePlugin):
             quotes,
             sorted_users,
             topic_counts,
-            quote_counts,
             user_counts,
             total_messages,
             len(user_counts),
@@ -1368,6 +1393,14 @@ class KiraDailyReport(BasePlugin):
         async with self._semaphore:
             try:
                 if self._is_incremental_group(group_id):
+                    self._log(f"增量模式：群 {group_id} 开始增量分析")
+                    incremental_success = await self._do_incremental_analysis(group_id)
+
+                    # 只有真正的错误（LLM 调用失败/异常）才回退到全量
+                    if not incremental_success:
+                        self._log(f"增量模式：群 {group_id} 增量分析出现错误，回退到全量分析")
+                        return await self._do_full_analysis(group_id, user_id)
+
                     self._log(f"增量模式：群 {group_id} 使用累积结果生成日报")
 
                     # 1. 检查跨天
@@ -1926,8 +1959,12 @@ class KiraDailyReport(BasePlugin):
             chain=MessageChain([Text(self.msg_processing)])
         )
 
-        await self._do_incremental_analysis(group_id)
-        await self._do_analysis(group_id, user_id)
+        # 只有增量群才走增量流程
+        if self._is_incremental_group(group_id):
+            await self._do_incremental_analysis(group_id)
+            await self._do_analysis(group_id, user_id)
+        else:
+            await self._do_full_analysis(group_id, user_id)
 
         event.discard(force=True)
         event.stop()
@@ -1977,7 +2014,12 @@ class KiraDailyReport(BasePlugin):
             await self._send_text_to_group(group_id, self.msg_cooldown.format(remaining=remaining))
             return "✅ 冷却中，已向用户说明。"
 
-        await self._do_incremental_analysis(group_id)
-        await self._do_analysis(group_id, user_id)
+        # 只有增量群才走增量流程
+        if self._is_incremental_group(group_id):
+            await self._do_incremental_analysis(group_id)
+            await self._do_analysis(group_id, user_id)
+        else:
+            await self._do_full_analysis(group_id, user_id)
+
         self.analysis_days = original_days
         return "✅ 日报任务已完成处理，结果已发送到群聊。"
