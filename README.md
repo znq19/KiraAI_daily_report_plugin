@@ -415,6 +415,3 @@ AGPL-3.0 License
 - 💬 KiraAI官方QQ 群: 874381335
 
 欢迎提交 Issue 和 Pull Request 来改进这个插件！
-```
-
----
