@@ -70,7 +70,7 @@ class KiraDailyReport(BasePlugin):
         # ---- 分析参数 ----
         analysis = cfg.get("section_analysis", {})
         self.analysis_days = analysis.get("analysis_days", 1)
-        self.max_messages_per_analysis = analysis.get("max_messages_per_analysis", 500)
+        self.max_messages_per_analysis = analysis.get("max_messages_per_analysis", 1000)
         self.min_messages_threshold = analysis.get("min_messages_threshold", 10)
         self.auto_analysis_time = analysis.get("auto_analysis_time", "23:59")
         self.enable_auto_analysis = analysis.get("enable_auto_analysis", True)
@@ -998,6 +998,7 @@ class KiraDailyReport(BasePlugin):
         quotes: List[dict],
         active_users: List[dict],
         topic_counts: dict,
+        quote_counts: dict,
         user_counts: dict,
         total_messages: int,
         participants: int,
@@ -1006,7 +1007,8 @@ class KiraDailyReport(BasePlugin):
     ):
         await self.db.save_cumulative_result(
             group_id, topics, quotes, active_users, topic_counts,
-            user_counts, total_messages, participants, last_batch_timestamp, merged_batch_count
+            quote_counts, user_counts, total_messages, participants,
+            last_batch_timestamp, merged_batch_count
         )
 
     async def _delete_cumulative(self, group_id: str):
@@ -1030,8 +1032,8 @@ class KiraDailyReport(BasePlugin):
             return False
 
         topic_counts: Dict[str, int] = {}
-        topic_meta: Dict[str, dict] = {}
         quote_counts: Dict[str, int] = {}
+        topic_meta: Dict[str, dict] = {}
         quote_meta: Dict[str, dict] = {}
         user_counts: Dict[str, int] = {}
         total_messages = 0
@@ -1105,6 +1107,7 @@ class KiraDailyReport(BasePlugin):
             quotes,
             sorted_users,
             topic_counts,
+            quote_counts,
             user_counts,
             total_messages,
             len(user_counts),
@@ -1130,6 +1133,7 @@ class KiraDailyReport(BasePlugin):
             return True
 
         topic_counts = json.loads(cumulative.get('topic_counts_json', '{}'))
+        quote_counts = json.loads(cumulative.get('quote_counts_json', '{}'))
         user_counts = json.loads(cumulative.get('user_counts_json', '{}'))
         topics = json.loads(cumulative.get('topics_json', '[]'))
         quotes = json.loads(cumulative.get('quotes_json', '[]'))
@@ -1163,6 +1167,7 @@ class KiraDailyReport(BasePlugin):
                 for quote in batch_quotes:
                     text = quote.get('text', '')
                     if text:
+                        quote_counts[text] = quote_counts.get(text, 0) + 1
                         if text not in quote_meta:
                             quote_meta[text] = quote
 
@@ -1204,7 +1209,7 @@ class KiraDailyReport(BasePlugin):
         if sharp_comment:
             existing_sharp_comments.append(sharp_comment)
 
-        # ⭐ 统一调用 LLM 完成所有润色任务
+        # 统一调用 LLM 完成所有润色任务
         result = await self._generate_full_daily_with_llm(
             topic_candidates=topic_candidates,
             quote_candidates=quote_candidates,
@@ -1215,41 +1220,24 @@ class KiraDailyReport(BasePlugin):
         if result:
             topics = result.get('topics', [])[:self.topic_max]
             quotes = result.get('quotes', [])[:self.quote_max]
-            # 如果 LLM 返回了最佳金句，从 quotes 中选取对应的
-            best_quote = result.get('best_quote')
-            # 更新累积结果的 sharp_comment
             if result.get('sharp_comment'):
                 sharp_comment = result.get('sharp_comment')
         else:
             topics = topic_candidates[:self.topic_max]
             quotes = quote_candidates[:self.quote_max]
-            best_quote = None
-
-        # 保存累积结果（包含 sharp_comment）
-        cumulative_data = {
-            'topics': topics,
-            'quotes': quotes,
-            'active_users': sorted_users,
-            'topic_counts': topic_counts,
-            'user_counts': user_counts,
-            'total_messages': total_messages,
-            'participants': len(user_counts),
-            'last_batch_timestamp': last_batch_ts,
-            'merged_batch_count': merged_batch_count,
-            'sharp_comment': sharp_comment
-        }
 
         await self._save_cumulative(
             group_id,
-            cumulative_data['topics'],
-            cumulative_data['quotes'],
-            cumulative_data['active_users'],
-            cumulative_data['topic_counts'],
-            cumulative_data['user_counts'],
-            cumulative_data['total_messages'],
-            cumulative_data['participants'],
-            cumulative_data['last_batch_timestamp'],
-            cumulative_data['merged_batch_count']
+            topics,
+            quotes,
+            sorted_users,
+            topic_counts,
+            quote_counts,
+            user_counts,
+            total_messages,
+            len(user_counts),
+            last_batch_ts,
+            merged_batch_count
         )
 
         self._log(f"累积合并：群 {group_id}，合并 {len(new_batches)} 个新批次，总计 {merged_batch_count} 个批次")
@@ -1440,13 +1428,11 @@ class KiraDailyReport(BasePlugin):
                         return await self._do_full_analysis(group_id, user_id)
 
                     # 7. 组装最终结果
-                    # 从累积结果中提取已有数据
                     sharp_comment = cumulative.get('sharp_comment', '')
                     header_comment = cumulative.get('header_comment', '')
 
                     # 如果累积结果中没有 header_comment 和 sharp_comment，需要重新生成
                     if not header_comment or not sharp_comment:
-                        # 调用统一润色（但此时可能没有候选池，只能从已有数据生成）
                         result = await self._generate_full_daily_with_llm(
                             topic_candidates=topics,
                             quote_candidates=quotes,
@@ -1462,7 +1448,6 @@ class KiraDailyReport(BasePlugin):
                         else:
                             best_quote = quotes[0] if quotes else None
                     else:
-                        # 已有完整数据，直接使用
                         best_quote = quotes[0] if quotes else None
 
                     final_result = {
