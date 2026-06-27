@@ -75,7 +75,7 @@
         "name": "单次最大分析消息数",
         "default": 1000,
         "minimum": 10,
-        "maximum": 5000,
+        "maximum": 50000,
         "hint": "超过此数量将截断消息，防止Token消耗过大"
       },
       "min_messages_threshold": {
