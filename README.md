@@ -1,5 +1,7 @@
 # 群聊日报插件 (KiraDaily)
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/znq19/KiraAI_daily_report_plugin)
+
 > 基于 KiraAI 框架的图片式智能群聊日报生成插件 —— 让 AI 自动为你总结群聊精华和吐槽吧
 
 **版本：v1.2.6**
