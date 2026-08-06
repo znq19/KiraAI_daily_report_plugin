@@ -167,6 +167,8 @@ class KiraDailyReport(BasePlugin):
         self._bot_avatar: Optional[str] = None
         self._collected_bot_messages: Set[str] = set()
         self._running_analysis_tasks: Set[str] = set()
+        # 后台生成任务（按 sid 管理）：工具快速返回，生成完成后 publish_notice 通知 LLM 接话
+        self._gen_tasks: Dict[str, asyncio.Task] = {}
 
         logger.info("[KiraDaily] 插件已加载")
 
@@ -205,6 +207,11 @@ class KiraDailyReport(BasePlugin):
 
     async def terminate(self):
         self._running = False
+        # 取消后台生成任务（工具触发的异步日报）
+        for t in list(self._gen_tasks.values()):
+            if not t.done():
+                t.cancel()
+        self._gen_tasks.clear()
         if self._scheduler_task and not self._scheduler_task.done():
             self._scheduler_task.cancel()
             try:
@@ -383,6 +390,25 @@ class KiraDailyReport(BasePlugin):
             await adapter.send_group_message(qq_group_id, MessageChain([Text(text)]))
         except Exception as e:
             self._log(f"发送文本到群 {group_id} 失败: {e}")
+
+    async def _publish_notice(self, sid: str, text: str) -> None:
+        """publish_notice：构造合成事件进主线路，LLM 接话完成回复（消息合并进会话）。
+
+        用于后台生成任务完成后，让 LLM 补一句"日报已生成"并自然合并消息。
+        """
+        try:
+            await self.ctx.publish_notice(sid, MessageChain([Text(text)]), is_mentioned=True)
+        except Exception:
+            logger.exception("[KiraDaily] publish_notice failed")
+
+    def _report_files(self) -> Set[str]:
+        """当前报告目录下的文件名集合（用于判断后台任务是否真正生成了新报告）。"""
+        try:
+            if self.reports_dir.exists():
+                return {p.name for p in self.reports_dir.glob("*")}
+        except Exception:
+            pass
+        return set()
 
     # ============================================================
     # 冷却检查
@@ -1528,8 +1554,11 @@ class KiraDailyReport(BasePlugin):
     # 全量分析
     # ============================================================
 
-    async def _do_full_analysis(self, group_id: str, user_id: str = "system") -> bool:
-        messages = await self.db.get_messages(group_id, int(time.time()) - self.analysis_days * 86400)
+    async def _do_full_analysis(self, group_id: str, user_id: str = "system", days: int = 0) -> bool:
+        # days>0 时用调用方指定的天数（后台并发任务隔离用），否则用实例配置
+        if days <= 0:
+            days = self.analysis_days
+        messages = await self.db.get_messages(group_id, int(time.time()) - days * 86400)
         total_msgs = len(messages)
         if total_msgs < self.min_messages_threshold:
             await self._send_text_to_group(
@@ -2003,23 +2032,55 @@ class KiraDailyReport(BasePlugin):
         if not self._is_group_enabled(group_id):
             await self._send_text_to_group(group_id, self.msg_not_enabled)
             return "✅ 已向用户说明该群未启用日报功能。"
-        original_days = self.analysis_days
-        self.analysis_days = min(max(days, 1), 7)
+        # days 规范化后仅作为本任务局部值使用；不改实例 analysis_days，
+        # 避免多群并发任务互相污染（全量分支显式传参隔离）
+        days = min(max(days or 1, 1), 7)
         user_id = self._get_user_id_from_event(event)
         if self._is_in_cooldown(group_id, user_id):
             remaining = self.cooldown_hours - (time.time() - self._cooldown_map.get(group_id, 0)) / 3600
             if remaining < 0:
                 remaining = 0
-            self.analysis_days = original_days
             await self._send_text_to_group(group_id, self.msg_cooldown.format(remaining=remaining))
             return "✅ 冷却中，已向用户说明。"
+        sid = self._get_sid(event)
 
-        # 只有增量群才走增量流程
-        if self._is_incremental_group(group_id):
-            await self._do_incremental_analysis(group_id)
-            await self._do_analysis(group_id, user_id)
-        else:
-            await self._do_full_analysis(group_id, user_id)
+        # 同一会话已有生成任务在跑 → 不重复触发
+        if sid in self._gen_tasks and not self._gen_tasks[sid].done():
+            return "⏳ 该群日报正在生成中，完成后会自动发送，请告知用户稍候，不要重复请求。"
 
-        self.analysis_days = original_days
-        return "✅ 日报任务已完成处理，结果已发送到群聊。"
+        async def _run():
+            try:
+                group_key = group_id.replace(":", "_")
+                before = self._report_files()
+                # 只有增量群才走增量流程；全量分支显式传 days，避免多群并发竞争实例属性
+                if self._is_incremental_group(group_id):
+                    await self._do_incremental_analysis(group_id)
+                    await self._do_analysis(group_id, user_id)
+                else:
+                    await self._do_full_analysis(group_id, user_id, days)
+                # 报告文件名含群ID+时间戳，每次生成必为新文件：按本群前缀判断是否真正生成
+                new_files = [f for f in (self._report_files() - before)
+                             if f.startswith(group_key)]
+                if new_files:
+                    await self._publish_notice(
+                        sid,
+                        "系统通知：日报已生成并发送到群里，请用一两句话告知用户日报已生成，不要重复发送日报。"
+                    )
+                else:
+                    await self._publish_notice(
+                        sid,
+                        "系统通知：日报未生成（可能是消息不足、冷却中或生成失败，插件已发送相应提示），"
+                        "请向用户简要说明情况，不要重复发送日报。"
+                    )
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[KiraDaily] 后台生成日报失败")
+                await self._publish_notice(sid, "系统通知：日报生成失败，请告知用户稍后重试。")
+            finally:
+                self._gen_tasks.pop(sid, None)
+
+        task = asyncio.create_task(_run())
+        self._gen_tasks[sid] = task
+        return ("✅ 已开始生成日报（LLM 分析与渲染需要一点时间），"
+                "完成后会自动发送到群里，请告知用户稍候。")
