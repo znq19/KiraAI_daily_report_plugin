@@ -184,7 +184,7 @@ class KiraDailyReport(BasePlugin):
 
         if not self.enable_natural_language_trigger:
             try:
-                self.ctx.llm_api.unregister_tool("generate_daily_report")
+                self.ctx.tool_mgr.unregister_tool("generate_daily_report")
                 self._log("自然语言触发已禁用，已从LLM工具列表中移除 generate_daily_report")
             except Exception as e:
                 self._log(f"注销工具失败（可能未注册）: {e}")
