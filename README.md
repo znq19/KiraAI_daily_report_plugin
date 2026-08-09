@@ -4,7 +4,7 @@
 
 > 基于 KiraAI 框架的图片式智能群聊日报生成插件 —— 让 AI 自动为你总结群聊精华和吐槽吧
 
-**版本：v1.2.7**
+**版本：v1.2.8**
 
 ---
 
@@ -330,6 +330,11 @@ kira_daily_report/
 
 <details>
 <summary><b>📝 更新日志（点击展开）</b></summary>
+
+### v1.2.8 (2026-08-10) — 兼容修复 🐛
+
+**🐛 修复**
+- 🔧 **适配新版工具注册机制**：`ctx.llm_api.unregister_tool` 改为 `ctx.tool_mgr.unregister_tool`（KiraAI 新版 `llm_api` 已废弃，工具统一由 `tool_mgr` 管理），修复自然语言触发禁用时工具注销失效的问题
 
 ### v1.2.7 (2026-08-06) — 异步生成 🚀
 
