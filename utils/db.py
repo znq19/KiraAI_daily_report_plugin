@@ -17,12 +17,20 @@ class DatabaseManager:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
     
+    async def _ensure_conn(self):
+        """连接被关闭后自动重连（插件热重载/卸载场景防御）"""
+        if self._conn is not None and getattr(self._conn, '_connection', None) is not None:
+            return
+        await self.init()
+    
     async def close(self):
         if self._conn:
             await self._conn.close()
+            self._conn = None
     
     async def create_tables(self):
         # 消息表
+        await self._ensure_conn()
         await self._conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,6 +107,7 @@ class DatabaseManager:
     
     async def save_message(self, session_id: str, user_id: str, nickname: str, 
                           content: str, timestamp: int):
+        await self._ensure_conn()
         await self._conn.execute(
             "INSERT INTO messages (session_id, user_id, nickname, content, timestamp) VALUES (?, ?, ?, ?, ?)",
             (session_id, user_id, nickname, content, timestamp)
@@ -106,6 +115,7 @@ class DatabaseManager:
         await self._conn.commit()
     
     async def get_messages(self, session_id: str, since_timestamp: int, limit: int = None) -> List[dict]:
+        await self._ensure_conn()
         if limit is not None:
             cursor = await self._conn.execute(
                 "SELECT user_id, nickname, content, timestamp FROM messages "
@@ -127,6 +137,7 @@ class DatabaseManager:
         ]
     
     async def get_messages_since(self, session_id: str, since_timestamp: int) -> List[dict]:
+        await self._ensure_conn()
         cursor = await self._conn.execute(
             "SELECT user_id, nickname, content, timestamp FROM messages "
             "WHERE session_id = ? AND timestamp > ? "
@@ -140,6 +151,7 @@ class DatabaseManager:
         ]
     
     async def get_all_groups(self) -> List[str]:
+        await self._ensure_conn()
         cursor = await self._conn.execute(
             "SELECT DISTINCT session_id FROM messages WHERE session_id LIKE 'qq:gm:%'"
         )
@@ -147,6 +159,7 @@ class DatabaseManager:
         return [r[0] for r in rows]
     
     async def delete_old_messages(self, before_timestamp: int):
+        await self._ensure_conn()
         await self._conn.execute(
             "DELETE FROM messages WHERE timestamp < ?",
             (before_timestamp,)
@@ -158,6 +171,7 @@ class DatabaseManager:
     # ============================================================
     
     async def get_last_incremental_time(self, session_id: str) -> int:
+        await self._ensure_conn()
         cursor = await self._conn.execute(
             "SELECT last_timestamp FROM incremental_state WHERE session_id = ?",
             (session_id,)
@@ -168,6 +182,7 @@ class DatabaseManager:
         return 0
     
     async def update_last_incremental_time(self, session_id: str, timestamp: int):
+        await self._ensure_conn()
         await self._conn.execute(
             "INSERT OR REPLACE INTO incremental_state (session_id, last_timestamp, updated_at) VALUES (?, ?, ?)",
             (session_id, timestamp, int(time.time()))
@@ -190,6 +205,7 @@ class DatabaseManager:
         active_users: List[dict],
         sharp_comment: str = ''
     ):
+        await self._ensure_conn()
         await self._conn.execute(
             """
             INSERT INTO incremental_batches (
@@ -213,6 +229,7 @@ class DatabaseManager:
         await self._conn.commit()
     
     async def get_incremental_batches(self, session_id: str, since_timestamp: int) -> List[dict]:
+        await self._ensure_conn()
         cursor = await self._conn.execute(
             """
             SELECT id, start_timestamp, end_timestamp, message_count, participants,
@@ -241,6 +258,7 @@ class DatabaseManager:
         ]
     
     async def delete_old_batches(self, before_timestamp: int):
+        await self._ensure_conn()
         await self._conn.execute(
             "DELETE FROM incremental_batches WHERE created_at < ?",
             (before_timestamp,)
@@ -253,6 +271,7 @@ class DatabaseManager:
     
     async def get_cumulative_result(self, session_id: str) -> Optional[dict]:
         """获取累积结果"""
+        await self._ensure_conn()
         cursor = await self._conn.execute(
             """
             SELECT topics_json, quotes_json, active_users_json, topic_counts_json,
@@ -294,6 +313,7 @@ class DatabaseManager:
         merged_batch_count: int
     ):
         """保存或更新累积结果（移除 quote_counts 参数）"""
+        await self._ensure_conn()
         now = int(time.time())
         await self._conn.execute(
             """
@@ -325,6 +345,7 @@ class DatabaseManager:
     
     async def delete_cumulative_result(self, session_id: str):
         """删除累积结果（跨天重置时使用）"""
+        await self._ensure_conn()
         await self._conn.execute(
             "DELETE FROM incremental_cumulative WHERE session_id = ?",
             (session_id,)
