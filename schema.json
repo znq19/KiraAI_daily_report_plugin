@@ -11,6 +11,12 @@
         "default": "",
         "hint": "留空使用默认快速模型，可选择已注册的 LLM 提供商"
       },
+      "adapter_name": {
+        "type": "string",
+        "name": "QQ 适配器实例名",
+        "default": "",
+        "hint": "留空自动使用第一个启用的 QQ 适配器；填写则使用该实例名（区分大小写，找不到会自动回退到自动探测）"
+      },
       "theme": {
         "type": "enum",
         "name": "日报主题风格",

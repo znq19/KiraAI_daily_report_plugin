@@ -158,6 +158,20 @@ class DatabaseManager:
         rows = await cursor.fetchall()
         return [r[0] for r in rows]
     
+    async def delete_messages_by_nicknames(self, nicknames) -> int:
+        """删除第三方插件合成消息留下的记录（它们不是群成员的真实发言）"""
+        await self._ensure_conn()
+        names = [str(n) for n in (nicknames or []) if n]
+        if not names:
+            return 0
+        placeholders = ",".join("?" for _ in names)
+        cursor = await self._conn.execute(
+            f"DELETE FROM messages WHERE nickname IN ({placeholders})",
+            tuple(names)
+        )
+        await self._conn.commit()
+        return cursor.rowcount or 0
+
     async def delete_old_messages(self, before_timestamp: int):
         await self._ensure_conn()
         await self._conn.execute(
