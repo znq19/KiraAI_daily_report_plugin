@@ -78,6 +78,7 @@ class KiraDailyReport(BasePlugin):
         self.enable_natural_language_trigger = basic.get("enable_natural_language_trigger", True)
         self.command_prefixes = basic.get("command_prefixes", ["/日报", "/群日报"])
         self.bot_nickname_override = basic.get("bot_nickname_override", "")
+        self.adapter_name = basic.get("adapter_name", "")
 
         # ---- 分析参数 ----
         analysis = cfg.get("section_analysis", {})
@@ -203,6 +204,9 @@ class KiraDailyReport(BasePlugin):
         else:
             self._log("自然语言触发已启用")
 
+        # 旧配置里的适配器名失效时先迁移（原子写回）
+        self._migrate_adapter_config()
+
         # 启动时清理过期数据
         await self._cleanup_old_reports()
         await self._cleanup_old_messages()
@@ -258,12 +262,105 @@ class KiraDailyReport(BasePlugin):
             logger.info(f"[KiraDaily] {msg}")
 
     # ============================================================
+    # 适配器解析：实例名可能是 QQ / 自定义名称，且查找区分大小写
+    # ============================================================
+
+    def _qq_adapters(self) -> Dict[str, object]:
+        """当前已启用的 QQ 适配器（按实例名）。"""
+        mgr = getattr(self.ctx, "adapter_mgr", None)
+        if not mgr or not hasattr(mgr, "get_adapters"):
+            return {}
+        result = {}
+        for name, adapter in (mgr.get_adapters() or {}).items():
+            info = getattr(adapter, "info", None)
+            platform = str(getattr(info, "platform", "") or "").strip().casefold()
+            label = str(getattr(info, "name", "") or "").strip().casefold()
+            if platform == "qq" or platform.startswith("qq") or label == "qq":
+                result[name] = adapter
+        return result
+
+    def _resolve_adapter(self):
+        """返回 (适配器实例, 实例名)。
+
+        优先用配置里的实例名（先精确、再大小写不敏感）；留空或找不到时，
+        自动取第一个已启用的 QQ 适配器，避免写死 "qq" 导致找不到。
+        """
+        mgr = getattr(self.ctx, "adapter_mgr", None)
+        if not mgr or not hasattr(mgr, "get_adapter"):
+            return None, ""
+        configured = str(getattr(self, "adapter_name", "") or "").strip()
+        if configured:
+            adapter = mgr.get_adapter(configured)
+            if adapter is not None:
+                return adapter, configured
+            lowered = configured.casefold()
+            for name, adapter in (mgr.get_adapters() or {}).items():
+                if name.casefold() == lowered:
+                    return adapter, name
+        qq = self._qq_adapters()
+        if qq:
+            name = next(iter(qq))
+            return qq[name], name
+        return None, ""
+
+    @staticmethod
+    def _session_adapter_name(event) -> str:
+        session = getattr(event, "session", None)
+        return str(getattr(session, "adapter_name", "") or "")
+
+    def _migrate_adapter_config(self):
+        """旧配置里的适配器实例名若已失效，原子清空以便自动探测（首次更新时执行）。"""
+        configured = str(getattr(self, "adapter_name", "") or "").strip()
+        if not configured:
+            return
+        mgr = getattr(self.ctx, "adapter_mgr", None)
+        if not mgr or not hasattr(mgr, "get_adapter"):
+            return
+        if mgr.get_adapter(configured) is not None:
+            return
+        if not self._qq_adapters():
+            # 适配器还没就绪时不要动配置，避免误清
+            return
+        try:
+            import os
+
+            from core.utils.path_utils import get_config_path
+
+            plugin_id = Path(__file__).resolve().parent.name
+            path = get_config_path() / "plugins" / f"{plugin_id}.json"
+            if not path.exists():
+                return
+            config = json.loads(path.read_text(encoding="utf-8"))
+            section = config.get("section_basic")
+            if not isinstance(section, dict):
+                return
+            if str(section.get("adapter_name", "") or "").strip() != configured:
+                return
+            section["adapter_name"] = ""
+            temporary = path.with_suffix(".adapter-migrate.tmp")
+            temporary.write_text(
+                json.dumps(config, ensure_ascii=False, indent=4), encoding="utf-8"
+            )
+            os.replace(temporary, path)  # 原子替换，失败不破坏原文件
+            self.plugin_cfg = config
+            try:
+                self.ctx.plugin_mgr.plugin_configs[plugin_id] = config
+            except Exception:
+                pass
+            self.adapter_name = ""
+            logger.info(
+                f"[KiraDaily] 旧适配器名 {configured!r} 已失效，已清空并改为自动探测第一个 QQ 适配器"
+            )
+        except Exception as e:
+            logger.warning(f"[KiraDaily] 适配器配置迁移失败（保持原值）: {e}")
+
+    # ============================================================
     # 获取 Bot 信息
     # ============================================================
 
     async def _fetch_bot_info(self):
         try:
-            adapter = self.ctx.adapter_mgr.get_adapter("qq")
+            adapter, _adapter_name = self._resolve_adapter()
             self._bot_self_id = None
             self._bot_nickname = None
             self._bot_avatar = None
@@ -329,7 +426,7 @@ class KiraDailyReport(BasePlugin):
 
     async def _get_group_name(self, group_id: str) -> str:
         try:
-            adapter = self.ctx.adapter_mgr.get_adapter("qq")
+            adapter, _adapter_name = self._resolve_adapter()
             if not adapter:
                 return group_id
             parts = group_id.split(":")
@@ -371,13 +468,18 @@ class KiraDailyReport(BasePlugin):
     def _get_group_id_from_event(self, event) -> Optional[str]:
         try:
             if hasattr(event, "sid"):
-                sid = event.sid
-                if sid.startswith("qq:gm:"):
+                sid = str(event.sid)
+                parts = sid.split(":")
+                if len(parts) == 3 and parts[1] == "gm" and all(parts):
                     return sid
                 return None
             if hasattr(event, "message") and hasattr(event.message, "group"):
                 if event.message.group:
-                    return f"qq:gm:{event.message.group.group_id}"
+                    name = self._session_adapter_name(event)
+                    if not name:
+                        _adapter, name = self._resolve_adapter()
+                    if name:
+                        return f"{name}:gm:{event.message.group.group_id}"
         except Exception:
             pass
         return None
@@ -405,7 +507,7 @@ class KiraDailyReport(BasePlugin):
 
     async def _send_text_to_group(self, group_id: str, text: str):
         try:
-            adapter = self.ctx.adapter_mgr.get_adapter("qq")
+            adapter, _adapter_name = self._resolve_adapter()
             if not adapter:
                 return
             parts = group_id.split(":")
@@ -550,8 +652,11 @@ class KiraDailyReport(BasePlugin):
         last_msg = event.messages[-1]
 
         group_id = None
-        if hasattr(last_msg, 'group') and last_msg.group:
-            group_id = f"qq:gm:{last_msg.group.group_id}"
+        name = self._session_adapter_name(event)
+        if not name:
+            _adapter, name = self._resolve_adapter()
+        if hasattr(last_msg, 'group') and last_msg.group and name:
+            group_id = f"{name}:gm:{last_msg.group.group_id}"
         else:
             return
 
@@ -1878,9 +1983,12 @@ class KiraDailyReport(BasePlugin):
     # ============================================================
 
     async def _send_report(self, group_id: str, report_path: Path):
-        adapter = self.ctx.adapter_mgr.get_adapter("qq")
+        adapter, _adapter_name = self._resolve_adapter()
         if not adapter:
-            logger.error("[KiraDaily] 无法获取QQ适配器")
+            logger.error(
+                "[KiraDaily] 未找到可用的 QQ 适配器，无法发送日报"
+                "（可在插件配置里填写适配器实例名，或留空自动探测）"
+            )
             return
         parts = group_id.split(":")
         if len(parts) >= 3:
