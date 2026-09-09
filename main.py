@@ -47,6 +47,18 @@ def parse_user_tag(text: str):
     return text, None
 
 
+# 第三方插件（如提醒插件）发布合成消息时使用的占位昵称：它们不是群成员的真实发言
+SYNTHETIC_SENDERS = frozenset(
+    {
+        "提醒任务所有者",
+        "system:reminder_plugin",
+        "自主意图循环",
+        "Web UI 用户",
+        "Web UI 管理员",
+    }
+)
+
+
 class KiraDailyReport(BasePlugin):
     def __init__(self, ctx, cfg: dict):
         super().__init__(ctx, cfg)
@@ -194,6 +206,7 @@ class KiraDailyReport(BasePlugin):
         # 启动时清理过期数据
         await self._cleanup_old_reports()
         await self._cleanup_old_messages()
+        await self._cleanup_synthetic_messages()
 
         if self.enable_auto_analysis:
             self._scheduler_task = asyncio.create_task(self._scheduler_loop())
@@ -226,6 +239,19 @@ class KiraDailyReport(BasePlugin):
                 pass
         await self.db.close()
         logger.info("[KiraDaily] 已卸载")
+
+    async def _cleanup_synthetic_messages(self):
+        """清理历史上被第三方插件合成昵称污染的消息记录（保留真实发言）"""
+        try:
+            removed = await self.db.delete_messages_by_nicknames(
+                sorted(SYNTHETIC_SENDERS)
+            )
+            if removed:
+                logger.info(
+                    f"[KiraDaily] 清理第三方插件合成消息 {removed} 条（不是群成员发言）"
+                )
+        except Exception as e:
+            logger.warning(f"[KiraDaily] 清理合成消息失败: {e}")
 
     def _log(self, msg: str):
         if self.verbose_log:
@@ -443,7 +469,14 @@ class KiraDailyReport(BasePlugin):
         if not group_id or not self._is_group_enabled(group_id):
             return
 
+        if getattr(event.message, "is_notice", False):
+            self._log("忽略第三方插件的合成通知消息，不计入日报")
+            return
+
         sender_nickname = event.message.sender.nickname if event.message.sender else ""
+        if sender_nickname in SYNTHETIC_SENDERS:
+            self._log(f"忽略合成昵称 {sender_nickname}（第三方插件），不计入日报")
+            return
         if sender_nickname in self.exclude_senders:
             self._log(f"屏蔽消息: 发送者 {sender_nickname} 在排除列表中，已忽略")
             return
