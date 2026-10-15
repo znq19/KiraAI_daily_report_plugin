@@ -2118,7 +2118,7 @@ class KiraDailyReport(BasePlugin):
             return
         group_id = self._get_group_id_from_event(event)
         if not group_id:
-            await self.ctx.message_processor.send_message_chain(
+            await self.ctx.send_message_chain(
                 session=self._get_sid(event),
                 chain=MessageChain([Text(self.msg_not_group)])
             )
@@ -2126,7 +2126,7 @@ class KiraDailyReport(BasePlugin):
             event.stop()
             return
         if not self._is_group_enabled(group_id):
-            await self.ctx.message_processor.send_message_chain(
+            await self.ctx.send_message_chain(
                 session=self._get_sid(event),
                 chain=MessageChain([Text(self.msg_not_enabled)])
             )
@@ -2142,7 +2142,7 @@ class KiraDailyReport(BasePlugin):
             event.discard(force=True)
             event.stop()
             return
-        await self.ctx.message_processor.send_message_chain(
+        await self.ctx.send_message_chain(
             session=self._get_sid(event),
             chain=MessageChain([Text(self.msg_processing)])
         )

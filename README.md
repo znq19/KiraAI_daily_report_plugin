@@ -330,6 +330,10 @@ kira_daily_report/
 <details>
 <summary><b>📝 更新日志（点击展开）</b></summary>
 
+### v1.3.2
+
+  - 兼容 KiraAI 3.0 GA 弃用面：3 处 `ctx.message_processor.send_message_chain` → `ctx.send_message_chain`（两代等价）。零行为变化。
+
 ### v1.3.1 (2026-10-12) — 群发送能力契约双世代化 📤
 
 - 群发送新增双世代封装：3.0 优先 `IMCapability.send_group_message`（官方能力契约），2.x 与 3.0 的 QQ 适配器委托方法兜底；框架未来移除委托方法时不受影响。
