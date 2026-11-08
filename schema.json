@@ -82,7 +82,7 @@
         "default": 1000,
         "minimum": 10,
         "maximum": 50000,
-        "hint": "超过此数量将截断消息，防止Token消耗过大"
+        "hint": "超过此数量将截断消息，防止Token消耗过大；该数量同时是送入 LLM 的聊天记录上限"
       },
       "min_messages_threshold": {
         "type": "integer",
@@ -133,10 +133,10 @@
         "hint": "分析时使用当前人设作为系统提示词"
       },
       "persona_id": {
-        "type": "string",
-        "name": "指定人设ID",
-        "default": "default",
-        "hint": "留空则使用当前活跃人设"
+        "type": "persona_select",
+        "name": "指定人设",
+        "default": "",
+        "hint": "留空使用当前激活人设；下拉选择后使用指定人设"
       },
       "topic_min": {
         "type": "integer",

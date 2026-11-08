@@ -888,8 +888,8 @@
             <div class="subtitle">{{ analysis.header_comment | default('✨ 今天的群聊也充满欢乐 ✨') }}</div>
         </div>
         <div class="date-badge">
-            {{ generate_time.strftime('%Y年%m月%d日') }}
-            <div class="weekday">{{ generate_time.strftime('%A') }} / {{ generate_time.strftime('%a') }}</div>
+            {{ report_time.strftime('%Y年%m月%d日') }}
+            <div class="weekday">{{ report_time.strftime('%A') }} / {{ report_time.strftime('%a') }}</div>
         </div>
     </div>
 

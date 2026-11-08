@@ -47,6 +47,15 @@ def parse_user_tag(text: str):
     return text, None
 
 
+def _persona_value(persona, key: str, default=None):
+    """兼容 PersonaInfo（3.x）与 dict（2.x）两种人设对象。"""
+    if persona is None:
+        return default
+    if isinstance(persona, dict):
+        return persona.get(key, default)
+    return getattr(persona, key, default)
+
+
 # 第三方插件（如提醒插件）发布合成消息时使用的占位昵称：它们不是群成员的真实发言
 SYNTHETIC_SENDERS = frozenset(
     {
@@ -83,7 +92,10 @@ class KiraDailyReport(BasePlugin):
         # ---- 分析参数 ----
         analysis = cfg.get("section_analysis", {})
         self.analysis_days = analysis.get("analysis_days", 1)
-        self.max_messages_per_analysis = analysis.get("max_messages_per_analysis", 1000)
+        try:
+            self.max_messages_per_analysis = max(1, int(analysis.get("max_messages_per_analysis", 1000)))
+        except (TypeError, ValueError):
+            self.max_messages_per_analysis = 1000
         self.min_messages_threshold = analysis.get("min_messages_threshold", 10)
         self.auto_analysis_time = analysis.get("auto_analysis_time", "23:59")
         self.enable_auto_analysis = analysis.get("enable_auto_analysis", True)
@@ -93,7 +105,7 @@ class KiraDailyReport(BasePlugin):
         content = cfg.get("section_content", {})
         self.enable_sharp_comment = content.get("enable_sharp_comment", True)
         self.inject_persona = content.get("inject_persona", True)
-        self.persona_id = content.get("persona_id", "default")
+        self.persona_id = content.get("persona_id", "")
         self.topic_min = content.get("topic_min", 1)
         self.topic_max = content.get("topic_max", 5)
         self.quote_max = content.get("quote_max", 3)
@@ -178,10 +190,21 @@ class KiraDailyReport(BasePlugin):
         self._bot_self_id: Optional[str] = None
         self._bot_nickname: Optional[str] = None
         self._bot_avatar: Optional[str] = None
-        self._collected_bot_messages: Set[str] = set()
+        self._collected_bot_messages: Dict[str, None] = {}
         self._running_analysis_tasks: Set[str] = set()
         # 后台生成任务（按 sid 管理）：工具快速返回，生成完成后 publish_notice 通知 LLM 接话
         self._gen_tasks: Dict[str, asyncio.Task] = {}
+
+        # 同群并发去重：定时/命令/工具/即时增量共用一个运行标记。
+        # 语义是“已有任务在跑就跳过”，避免第二个触发排队几分钟后又生成一份重复日报。
+        self._running_groups: Set[str] = set()
+        # 即时增量触发的后台任务（不在 _gen_tasks 里，单独跟踪以便卸载时取消）
+        self._analysis_tasks: Set[asyncio.Task] = set()
+        # 多 QQ 适配器时按实例名缓存 bot 身份，避免 A 群的日报用 B 号的昵称/头像/self_id
+        self._bot_infos: Dict[str, Dict[str, str]] = {}
+        self._bot_info_locks: Dict[str, asyncio.Lock] = {}
+        self._tzinfo = None
+        self._tz_loaded = False
 
         logger.info("[KiraDaily] 插件已加载")
 
@@ -224,23 +247,22 @@ class KiraDailyReport(BasePlugin):
 
     async def terminate(self):
         self._running = False
-        # 取消后台生成任务（工具触发的异步日报）
-        for t in list(self._gen_tasks.values()):
-            if not t.done():
-                t.cancel()
+        # 先停调度器，确保它不会再派发新的分析任务；再取消已派发的任务，最后关库。
+        for scheduler_task in (self._scheduler_task, self._incremental_scheduler_task):
+            if scheduler_task and not scheduler_task.done():
+                scheduler_task.cancel()
+                try:
+                    await scheduler_task
+                except asyncio.CancelledError:
+                    pass
+        tasks = [t for t in list(self._gen_tasks.values()) + list(self._analysis_tasks) if not t.done()]
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._gen_tasks.clear()
-        if self._scheduler_task and not self._scheduler_task.done():
-            self._scheduler_task.cancel()
-            try:
-                await self._scheduler_task
-            except asyncio.CancelledError:
-                pass
-        if self._incremental_scheduler_task and not self._incremental_scheduler_task.done():
-            self._incremental_scheduler_task.cancel()
-            try:
-                await self._incremental_scheduler_task
-            except asyncio.CancelledError:
-                pass
+        self._analysis_tasks.clear()
+        self._running_groups.clear()
         await self.db.close()
         logger.info("[KiraDaily] 已卸载")
 
@@ -260,6 +282,32 @@ class KiraDailyReport(BasePlugin):
     def _log(self, msg: str):
         if self.verbose_log:
             logger.info(f"[KiraDaily] {msg}")
+
+    def _timezone(self):
+        """跟随 KiraAI 的 locale.TZ；没有/无效时回退系统本地时区。
+
+        配置时区在插件生命周期内不会变（变更需重载插件），首次读取后缓存，
+        避免每条消息/每次格式化都去读配置。
+        """
+        if self._tz_loaded:
+            return self._tzinfo
+        getter = getattr(self.ctx, "get_timezone", None)
+        self._tzinfo = None
+        if callable(getter):
+            try:
+                self._tzinfo = getter()
+            except Exception:
+                self._tzinfo = None
+        self._tz_loaded = True
+        return self._tzinfo
+
+    def _now(self):
+        tz = self._timezone()
+        return datetime.now(tz) if tz else datetime.now()
+
+    def _dt(self, timestamp):
+        tz = self._timezone()
+        return datetime.fromtimestamp(timestamp, tz) if tz else datetime.fromtimestamp(timestamp)
 
     # ============================================================
     # 适配器解析：实例名可能是 QQ / 自定义名称，且查找区分大小写
@@ -358,67 +406,161 @@ class KiraDailyReport(BasePlugin):
     # 获取 Bot 信息
     # ============================================================
 
-    async def _fetch_bot_info(self):
+    def _group_adapter_name(self, group_id: str) -> str:
+        parts = str(group_id or "").split(":")
+        return parts[0] if len(parts) >= 3 else ""
+
+    def _adapter_for_group(self, group_id: str):
+        """返回本群应使用的适配器。
+
+        兼容旧配置：显式填写了有效的「QQ 适配器实例名」时，继续全程使用该实例
+        （与旧版行为一致）；留空/失效时才按群 ID 前缀自动识别，最后回退全局探测。
+        """
+        mgr = getattr(self.ctx, "adapter_mgr", None)
+        configured = str(getattr(self, "adapter_name", "") or "").strip()
+        if configured and mgr and hasattr(mgr, "get_adapter"):
+            try:
+                adapter = mgr.get_adapter(configured)
+                if adapter is None:
+                    lowered = configured.casefold()
+                    for name, candidate in (mgr.get_adapters() or {}).items():
+                        if name.casefold() == lowered:
+                            adapter = candidate
+                            configured = name
+                            break
+                if adapter is not None:
+                    return adapter, configured
+            except Exception:
+                pass
+
+        name = self._group_adapter_name(group_id)
+        if name and mgr and hasattr(mgr, "get_adapter"):
+            try:
+                adapter = mgr.get_adapter(name)
+                if adapter is not None:
+                    info = getattr(adapter, "info", None)
+                    platform = str(getattr(info, "platform", "") or "").strip().casefold()
+                    label = str(getattr(info, "name", "") or "").strip().casefold()
+                    # 只按群所属的 QQ 适配器取 bot 身份；非 QQ 群保持原来的全局探测行为
+                    if platform == "qq" or platform.startswith("qq") or label == "qq":
+                        return adapter, name
+            except Exception:
+                pass
+        return self._resolve_adapter()
+
+    async def _load_bot_info(self, adapter) -> Dict[str, str]:
+        """读取单个适配器的 bot 身份；不写实例字段，供多适配器并发安全使用。"""
+        self_id = ""
+        nickname = self.bot_nickname_override or ""
+        avatar = ""
         try:
-            adapter, _adapter_name = self._resolve_adapter()
-            self._bot_self_id = None
-            self._bot_nickname = None
-            self._bot_avatar = None
+            if adapter is not None:
+                info = getattr(adapter, "info", None)
+                conf = getattr(info, "config", None) or {}
+                self_id = str(conf.get("self_id", "") or "")
+                if not self_id:
+                    bot = getattr(adapter, "bot", None)
+                    if bot is not None and hasattr(bot, "uin"):
+                        self_id = str(bot.uin or "")
+                    elif bot is not None and hasattr(bot, "self_id"):
+                        self_id = str(bot.self_id or "")
 
-            if adapter:
-                self._bot_self_id = str(adapter.info.config.get("self_id", ""))
-                if not self._bot_self_id:
-                    if hasattr(adapter, "bot") and hasattr(adapter.bot, "uin"):
-                        self._bot_self_id = str(adapter.bot.uin)
-                    elif hasattr(adapter, "bot") and hasattr(adapter.bot, "self_id"):
-                        self._bot_self_id = str(adapter.bot.self_id)
-
-                if self._bot_self_id:
-                    self._bot_avatar = await self.avatar_cache.get_bot_avatar(self._bot_self_id)
-                    if self.bot_nickname_override:
-                        self._bot_nickname = self.bot_nickname_override
-                    else:
-                        if hasattr(adapter, "get_login_info"):
+                if self_id:
+                    avatar = await self.avatar_cache.get_bot_avatar(self_id)
+                    if not nickname and hasattr(adapter, "get_login_info"):
+                        try:
+                            login = await adapter.get_login_info()
+                            if login and login.get("nickname"):
+                                nickname = login["nickname"]
+                        except Exception:
+                            pass
+                    if not nickname:
+                        bot = getattr(adapter, "bot", None)
+                        if bot is not None and hasattr(bot, "send_action"):
                             try:
-                                info = await adapter.get_login_info()
-                                if info and info.get("nickname"):
-                                    self._bot_nickname = info["nickname"]
-                            except Exception:
-                                pass
-                        if not self._bot_nickname and hasattr(adapter, "bot") and hasattr(adapter.bot, "send_action"):
-                            try:
-                                result = await adapter.bot.send_action("get_login_info", {})
+                                result = await bot.send_action("get_login_info", {})
                                 if result and result.get("status") == "ok":
                                     data = result.get("data", {})
                                     if data.get("nickname"):
-                                        self._bot_nickname = data["nickname"]
+                                        nickname = data["nickname"]
                             except Exception:
                                 pass
-                        if not self._bot_nickname:
-                            self._bot_nickname = "AI"
-                else:
-                    self._bot_self_id = self.ctx.config.get("bot_config.bot.self_id", "")
-                    if self._bot_self_id:
-                        self._bot_avatar = await self.avatar_cache.get_bot_avatar(self._bot_self_id)
-                        self._bot_nickname = self.bot_nickname_override or "AI"
-                    else:
-                        self._bot_self_id = "0"
-                        self._bot_nickname = self.bot_nickname_override or "AI"
-                        self._bot_avatar = await self.avatar_cache.get_bot_avatar("0")
-            else:
-                self._bot_self_id = self.ctx.config.get("bot_config.bot.self_id", "")
-                if self._bot_self_id:
-                    self._bot_avatar = await self.avatar_cache.get_bot_avatar(self._bot_self_id)
-                    self._bot_nickname = self.bot_nickname_override or "AI"
-                else:
-                    self._bot_self_id = "0"
-                    self._bot_nickname = self.bot_nickname_override or "AI"
-                    self._bot_avatar = await self.avatar_cache.get_bot_avatar("0")
+            if not self_id:
+                self_id = str(self.ctx.config.get("bot_config.bot.self_id", "") or "")
+                if self_id:
+                    avatar = await self.avatar_cache.get_bot_avatar(self_id)
+            if not self_id:
+                self_id = "0"
+            if not avatar:
+                avatar = await self.avatar_cache.get_bot_avatar(self_id)
+        except Exception as e:
+            self._log(f"获取 bot 信息失败: {e}")
+        if not self_id:
+            self_id = "0"
+        if not nickname:
+            nickname = "AI"
+        if not avatar:
+            try:
+                avatar = await self.avatar_cache.get_bot_avatar(self_id or "0")
+            except Exception:
+                avatar = ""
+        return {"self_id": self_id, "nickname": nickname, "avatar": avatar}
+
+    async def _get_bot_info(self, adapter, adapter_name: str = "", force: bool = False) -> Dict[str, str]:
+        """按适配器缓存 bot 身份；并发请求同一适配器只拉一次。"""
+        key = adapter_name or ""
+        if not force and key in self._bot_infos:
+            return self._bot_infos[key]
+        lock = self._bot_info_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._bot_info_locks[key] = lock
+        async with lock:
+            if not force and key in self._bot_infos:
+                return self._bot_infos[key]
+            info = await self._load_bot_info(adapter)
+            # 头像失败时不要永久缓存空值，下一次日报会重试。
+            if info.get("avatar") and (force or info.get("self_id") != "0" or not key):
+                self._bot_infos[key] = info
+            return info
+
+    async def _resolve_persona(self):
+        """空 = 当前激活人设；非空 = 人设 ID（下拉框存的就是 ID）；无效 ID 回退当前激活人设。"""
+        if not self.inject_persona:
+            return None
+        mgr = getattr(self.ctx, "persona_mgr", None)
+        if mgr is None:
+            return None
+
+        raw = str(getattr(self, "persona_id", "") or "").strip()
+        if raw:
+            try:
+                persona = await mgr.get_persona(raw)
+            except Exception:
+                persona = None
+            if persona:
+                return persona
+            # 无效 ID（例如人设已删除）按“未选择”处理，回退当前激活人设。
+        try:
+            return await mgr.get_active_persona()
+        except Exception:
+            return None
+
+    async def _fetch_bot_info(self):
+        try:
+            adapter, adapter_name = self._resolve_adapter()
+            info = await self._get_bot_info(adapter, adapter_name, force=True)
+            self._bot_self_id = info["self_id"]
+            self._bot_nickname = info["nickname"]
+            self._bot_avatar = info["avatar"]
         except Exception as e:
             self._log(f"获取 bot 信息失败: {e}")
             self._bot_self_id = "0"
             self._bot_nickname = self.bot_nickname_override or "AI"
-            self._bot_avatar = await self.avatar_cache.get_bot_avatar("0")
+            try:
+                self._bot_avatar = await self.avatar_cache.get_bot_avatar("0")
+            except Exception:
+                self._bot_avatar = ""
 
     # ============================================================
     # 获取群名称
@@ -426,7 +568,7 @@ class KiraDailyReport(BasePlugin):
 
     async def _get_group_name(self, group_id: str) -> str:
         try:
-            adapter, _adapter_name = self._resolve_adapter()
+            adapter, _adapter_name = self._adapter_for_group(group_id)
             if not adapter:
                 return group_id
             parts = group_id.split(":")
@@ -507,7 +649,7 @@ class KiraDailyReport(BasePlugin):
 
     async def _send_text_to_group(self, group_id: str, text: str):
         try:
-            adapter, _adapter_name = self._resolve_adapter()
+            adapter, _adapter_name = self._adapter_for_group(group_id)
             if not adapter:
                 return
             parts = group_id.split(":")
@@ -652,9 +794,11 @@ class KiraDailyReport(BasePlugin):
                     if not self._is_in_cooldown(group_id, "system_immediate"):
                         self._log(f"⚡ 触发实时分析：群 {group_id} 新增消息已达 {len(new_msgs)} 条")
                         self._running_analysis_tasks.add(task_key)
-                        asyncio.create_task(
+                        task = asyncio.create_task(
                             self._safe_do_analysis(group_id, "system_immediate", immediate=True)
                         )
+                        self._analysis_tasks.add(task)
+                        task.add_done_callback(self._analysis_tasks.discard)
 
     # ============================================================
     # 备选：通过 message_sent 捕获 Bot 消息
@@ -688,10 +832,15 @@ class KiraDailyReport(BasePlugin):
             return
 
         msg_id = str(last_msg.message_id) if hasattr(last_msg, 'message_id') else None
-        if msg_id and msg_id in self._collected_bot_messages:
-            return
         if msg_id:
-            self._collected_bot_messages.add(msg_id)
+            # 按 适配器+消息ID 去重：不同适配器的消息 ID 可能撞号
+            dedup_key = f"{name}:{msg_id}"
+            if dedup_key in self._collected_bot_messages:
+                return
+            self._collected_bot_messages[dedup_key] = None
+            if len(self._collected_bot_messages) > 5000:
+                oldest = next(iter(self._collected_bot_messages))
+                self._collected_bot_messages.pop(oldest, None)
 
         text_parts = []
         has_valid_content = False
@@ -715,7 +864,8 @@ class KiraDailyReport(BasePlugin):
 
         nickname = last_msg.sender.nickname if last_msg.sender else "Bot"
         if nickname == "未知" or nickname == "unknown":
-            nickname = self._bot_nickname or "Bot"
+            bot_info = await self._get_bot_info(*self._adapter_for_group(group_id))
+            nickname = bot_info.get("nickname") or self._bot_nickname or "Bot"
         timestamp = last_msg.timestamp or int(time.time())
 
         await self.db.save_message(
@@ -775,12 +925,12 @@ class KiraDailyReport(BasePlugin):
         n = len(timestamps)
 
         if n == 1:
-            dt = datetime.fromtimestamp(timestamps[0])
+            dt = self._dt(timestamps[0])
             return f"{dt.strftime('%H:%M')}"
 
         if n == 2:
-            start_dt = datetime.fromtimestamp(timestamps[0])
-            end_dt = datetime.fromtimestamp(timestamps[1])
+            start_dt = self._dt(timestamps[0])
+            end_dt = self._dt(timestamps[1])
             if start_dt.date() == end_dt.date():
                 return f"{start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}"
             else:
@@ -829,8 +979,8 @@ class KiraDailyReport(BasePlugin):
             start_ts = timestamps[start_idx]
             end_ts = timestamps[-1]
 
-            start_dt = datetime.fromtimestamp(start_ts)
-            end_dt = datetime.fromtimestamp(end_ts)
+            start_dt = self._dt(start_ts)
+            end_dt = self._dt(end_ts)
             if start_dt.date() == end_dt.date():
                 return f"{start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}"
             else:
@@ -866,62 +1016,13 @@ class KiraDailyReport(BasePlugin):
             start_ts = timestamps[best_start_idx]
             end_ts = timestamps[best_end_idx]
 
-        start_dt = datetime.fromtimestamp(start_ts)
-        end_dt = datetime.fromtimestamp(end_ts)
+        start_dt = self._dt(start_ts)
+        end_dt = self._dt(end_ts)
 
         if start_dt.date() == end_dt.date():
             return f"{start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}"
         else:
             return f"{start_dt.strftime('%m-%d %H:%M')}-{end_dt.strftime('%m-%d %H:%M')}"
-
-    # ============================================================
-    # 金句 LLM 精选
-    # ============================================================
-
-    async def _rank_quotes_by_llm(self, candidates: List[dict], top_n: int) -> List[dict]:
-        """
-        让 LLM 从候选金句中按精彩程度排序，选出 Top N。
-        候选池由调用方控制大小（通常为 quote_max * 2）
-        """
-        if not candidates:
-            return []
-
-        if len(candidates) <= top_n:
-            return candidates[:top_n]
-
-        candidate_list = candidates[:20]
-        quote_text = "\n".join([
-            f"{i+1}. {q.get('text', '')} —— {q.get('sender', '未知')}"
-            for i, q in enumerate(candidate_list)
-        ])
-
-        prompt = f"""请从以下候选金句中，评选出最精彩、最有趣、最有代表性的 {top_n} 条金句。
-
-评选标准：
-- 优先选择幽默、犀利、能引起共鸣的句子
-- 优先选择能代表群聊氛围的句子
-- 按精彩程度从高到低排序
-
-候选金句：
-{quote_text}
-
-输出格式（严格 JSON 数组）：
-[
-  {{"text": "金句原文", "sender": "发送者（保持原格式，如 周武#123456）"}},
-  ...
-]
-"""
-
-        try:
-            result = await self._call_llm(prompt)
-            if isinstance(result, list) and result:
-                valid = [q for q in result if q.get('text') and q.get('sender')]
-                if valid:
-                    return valid[:top_n]
-        except Exception as e:
-            self._log(f"LLM 评选金句失败: {e}")
-
-        return candidates[:top_n]
 
     # ============================================================
     # ⭐ 统一润色方法（合并 3 次调用为 1 次）
@@ -959,19 +1060,13 @@ class KiraDailyReport(BasePlugin):
         if existing_sharp_comments:
             sharp_ref = f"\n历史锐评风格参考（仅作风格参考，不要照抄）：{existing_sharp_comments[-1]}"
 
-        # 构建人设风格提示
+        # 构建人设风格提示（本站只修“选谁”，提示词原文不动）
         persona_prompt = ""
         if self.inject_persona:
-            try:
-                if self.persona_id and self.persona_id != "default":
-                    persona = await self.ctx.persona_mgr.get_persona(self.persona_id)
-                else:
-                    personas = await self.ctx.persona_mgr.list_personas()
-                    persona = personas[0] if personas else None
-                if persona:
-                    persona_prompt = f"\n请以以下人设风格进行点评和吐槽：\n{persona.content}\n"
-            except Exception as e:
-                self._log(f"获取人设失败: {e}")
+            persona = await self._resolve_persona()
+            content = str(_persona_value(persona, "content", "") or "")
+            if content.strip():
+                persona_prompt = f"\n请以以下人设风格进行点评和吐槽：\n{content}\n"
 
         prompt = f"""你是一个群聊日报精炼师。请根据以下群聊汇总信息，完成五项任务。
 
@@ -1024,37 +1119,41 @@ class KiraDailyReport(BasePlugin):
     # 全量分析 Prompt
     # ============================================================
 
-    async def _build_analysis_prompt(self, messages: List[dict], truncated: bool) -> str:
-        if self._bot_self_id:
-            messages = [m for m in messages if m['user_id'] != self._bot_self_id]
+    async def _build_analysis_prompt(
+        self,
+        messages: List[dict],
+        truncated: bool,
+        bot_self_id: Optional[str] = None,
+    ) -> str:
+        self_id = bot_self_id or self._bot_self_id
+        if self_id:
+            messages = [m for m in messages if m['user_id'] != self_id]
 
         msg_lines = []
-        for msg in messages[-200:]:
-            ts = datetime.fromtimestamp(msg["timestamp"]).strftime("%H:%M")
+        limit = max(1, int(self.max_messages_per_analysis or 1000))
+        for msg in messages[-limit:]:
+            ts = self._dt(msg["timestamp"]).strftime("%H:%M")
             user_tag = f"{msg['nickname']}#{msg['user_id']}"
             msg_lines.append(f"[{ts}] {user_tag}: {msg['content']}")
         msg_text = "\n".join(msg_lines)
 
-        persona_prompt = ""
+        # 人设是“谁在写”，不是“用什么风格写”：有可用人设时把 content 放在最前面，
+        # 让总结/话题/锐评都从这个人设出发；没有时才退回原来的分析师写法。
+        persona_block = "你是一个群聊数据分析师。请分析以下群聊记录，生成一份简洁的日报。\n\n"
         if self.inject_persona:
-            try:
-                if self.persona_id and self.persona_id != "default":
-                    persona = await self.ctx.persona_mgr.get_persona(self.persona_id)
-                else:
-                    personas = await self.ctx.persona_mgr.list_personas()
-                    persona = personas[0] if personas else None
-                if persona:
-                    persona_prompt = f"\n请以以下人设风格进行分析和点评：\n{persona.content}\n"
-            except Exception as e:
-                self._log(f"获取人设失败: {e}")
+            persona = await self._resolve_persona()
+            content = str(_persona_value(persona, "content", "") or "")
+            if content.strip():
+                persona_block = (
+                    f"{content}\n\n"
+                    "以上是你的身份、性格和说话方式，按以上人设风格进行分析和点评，生成一份简洁的日报："
+                )
 
         sharp_instruction = """
-5. 锐评：用一句话对今天的群聊进行锐评（毒舌、幽默或温柔），语气符合人设风格。
+6. 锐评：用一句话对今天的群聊进行锐评（毒舌、幽默或温柔），语气符合人设风格。
 """ if self.enable_sharp_comment else ""
 
-        prompt = f"""你是一个群聊数据分析师。请分析以下群聊记录，生成一份简洁的日报。
-
-{persona_prompt}
+        prompt = f"""{persona_block}
 
 【重要：用户标识】
 聊天记录中每个用户名字后面都有 `#QQ号` 后缀（如 `周武#123456`），即使名字相同，QQ号不同代表不同用户。请在输出中保持使用完整的 `名字#QQ号` 格式。
@@ -1097,13 +1196,15 @@ class KiraDailyReport(BasePlugin):
     # 增量分析 Prompt
     # ============================================================
 
-    async def _call_llm_incremental(self, messages: List[dict]) -> dict:
-        if self._bot_self_id:
-            messages = [m for m in messages if m['user_id'] != self._bot_self_id]
+    async def _call_llm_incremental(self, messages: List[dict], bot_self_id: Optional[str] = None) -> dict:
+        self_id = bot_self_id or self._bot_self_id
+        if self_id:
+            messages = [m for m in messages if m['user_id'] != self_id]
 
         msg_lines = []
-        for msg in messages[-200:]:
-            ts = datetime.fromtimestamp(msg["timestamp"]).strftime("%H:%M")
+        limit = max(1, int(self.max_messages_per_analysis or 1000))
+        for msg in messages[-limit:]:
+            ts = self._dt(msg["timestamp"]).strftime("%H:%M")
             user_tag = f"{msg['nickname']}#{msg['user_id']}"
             msg_lines.append(f"[{ts}] {user_tag}: {msg['content']}")
         msg_text = "\n".join(msg_lines)
@@ -1157,7 +1258,9 @@ class KiraDailyReport(BasePlugin):
             if len(messages) > self.max_messages_per_analysis:
                 messages = messages[-self.max_messages_per_analysis:]
 
-            result = await self._call_llm_incremental(messages)
+            bot_info = await self._get_bot_info(*self._adapter_for_group(group_id))
+            bot_self_id = bot_info.get("self_id", "")
+            result = await self._call_llm_incremental(messages, bot_self_id=bot_self_id)
             if not result:
                 self._log(f"增量分析 LLM 返回空结果：群 {group_id}")
                 return False
@@ -1167,7 +1270,7 @@ class KiraDailyReport(BasePlugin):
             for q in quotes:
                 sender = q.get('sender', '')
                 _, uid = parse_user_tag(sender)
-                if uid and uid == self._bot_self_id:
+                if uid and uid == bot_self_id:
                     continue
                 filtered_quotes.append(q)
             result['quotes'] = filtered_quotes
@@ -1334,6 +1437,20 @@ class KiraDailyReport(BasePlugin):
         last_ts = cumulative.get('last_batch_timestamp', 0)
         cutoff = int(time.time()) - self.window_hours * 3600
         all_batches = await self.db.get_incremental_batches(group_id, cutoff)
+
+        # 累积结果必须只对应“当前窗口内的批次”。如果窗口滑动、批次被清理或
+        # window_hours 改过，旧 topics/quotes/total 会残留，必须先按窗口重建。
+        window_total = sum(int(b.get('message_count', 0) or 0) for b in all_batches)
+        if (not all_batches
+                or int(cumulative.get('total_messages', 0) or 0) != window_total
+                or int(cumulative.get('merged_batch_count', 0) or 0) != len(all_batches)):
+            self._log(
+                f"累积结果与当前窗口不一致（累计 {cumulative.get('total_messages', 0)} 条/"
+                f"{cumulative.get('merged_batch_count', 0)} 批，窗口 {window_total} 条/"
+                f"{len(all_batches)} 批），按窗口重建"
+            )
+            return await self._build_cumulative_from_batches(group_id)
+
         new_batches = [b for b in all_batches if b['start_timestamp'] > last_ts]
 
         if not new_batches:
@@ -1550,21 +1667,43 @@ class KiraDailyReport(BasePlugin):
 
     async def _safe_do_analysis(self, group_id: str, user_id: str, immediate: bool = False):
         task_key = f"incremental_{group_id}" if immediate else f"full_{group_id}"
-        try:
-            if immediate:
-                await self._do_incremental_analysis(group_id)
-            else:
+        if not immediate:
+            try:
                 await self._do_analysis(group_id, user_id)
+            except Exception as e:
+                logger.error(f"[KiraDaily] 后台分析任务失败 {group_id}: {e}")
+            finally:
+                self._running_analysis_tasks.discard(task_key)
+            return
+        if group_id in self._running_groups:
+            self._log(f"即时增量跳过：群 {group_id} 已有分析任务在跑")
+            self._running_analysis_tasks.discard(task_key)
+            return
+        self._running_groups.add(group_id)
+        try:
+            async with self._semaphore:
+                await self._do_incremental_analysis(group_id)
         except Exception as e:
             logger.error(f"[KiraDaily] 后台分析任务失败 {group_id}: {e}")
         finally:
+            self._running_groups.discard(group_id)
             self._running_analysis_tasks.discard(task_key)
 
     # ============================================================
     # 核心分析逻辑
     # ============================================================
 
-    async def _do_analysis(self, group_id: str, user_id: str = "system") -> bool:
+    async def _do_analysis(self, group_id: str, user_id: str = "system", days: int = 0) -> bool:
+        if group_id in self._running_groups:
+            self._log(f"群 {group_id} 已有分析任务在跑，跳过本次触发")
+            return True
+        self._running_groups.add(group_id)
+        try:
+            return await self._do_analysis_locked(group_id, user_id, days)
+        finally:
+            self._running_groups.discard(group_id)
+
+    async def _do_analysis_locked(self, group_id: str, user_id: str = "system", days: int = 0) -> bool:
         if self._is_in_cooldown(group_id, user_id):
             remaining = self.cooldown_hours - (time.time() - self._cooldown_map.get(group_id, 0)) / 3600
             if remaining < 0:
@@ -1581,9 +1720,11 @@ class KiraDailyReport(BasePlugin):
                     # 只有真正的错误（LLM 调用失败/异常）才回退到全量
                     if not incremental_success:
                         self._log(f"增量模式：群 {group_id} 增量分析出现错误，回退到全量分析")
-                        return await self._do_full_analysis(group_id, user_id)
+                        return await self._do_full_analysis(group_id, user_id, days)
 
                     self._log(f"增量模式：群 {group_id} 使用累积结果生成日报")
+                    bot_info = await self._get_bot_info(*self._adapter_for_group(group_id))
+                    bot_self_id = bot_info.get("self_id", "")
 
                     # 1. 检查跨天
                     if await self._is_cross_day(group_id):
@@ -1603,7 +1744,7 @@ class KiraDailyReport(BasePlugin):
                     cumulative = await self._get_cumulative(group_id)
                     if not cumulative:
                         self._log(f"增量模式：群 {group_id} 无累积结果，回退到全量分析")
-                        return await self._do_full_analysis(group_id, user_id)
+                        return await self._do_full_analysis(group_id, user_id, days)
 
                     # 4. 从累积结果提取话题、金句
                     topics = json.loads(cumulative.get('topics_json', '[]'))
@@ -1615,7 +1756,7 @@ class KiraDailyReport(BasePlugin):
 
                     for msg in all_window_msgs:
                         uid = msg.get('user_id', '')
-                        if not uid or uid == self._bot_self_id:
+                        if not uid or uid == bot_self_id:
                             continue
                         user_msg_counts[uid] += 1
                         if msg.get('nickname'):
@@ -1640,7 +1781,7 @@ class KiraDailyReport(BasePlugin):
                     # 6. 回退检查
                     if not topics and not quotes and not active_users_from_db:
                         self._log(f"增量模式：合并后仍无数据，回退到全量分析")
-                        return await self._do_full_analysis(group_id, user_id)
+                        return await self._do_full_analysis(group_id, user_id, days)
 
                     # 7. 组装最终结果
                     sharp_comment = cumulative.get('sharp_comment', '')
@@ -1693,13 +1834,14 @@ class KiraDailyReport(BasePlugin):
                         group_id, final_result, [],
                         False,
                         actual_start_ts, actual_end_ts,
-                        is_incremental=True
+                        is_incremental=True,
+                        bot_info=bot_info
                     )
                     await self._send_report(group_id, report_path)
                     self._update_cooldown(group_id)
                     return True
 
-                return await self._do_full_analysis(group_id, user_id)
+                return await self._do_full_analysis(group_id, user_id, days)
 
             except Exception as e:
                 logger.error(f"[KiraDaily] 分析群 {group_id} 失败: {e}")
@@ -1723,15 +1865,24 @@ class KiraDailyReport(BasePlugin):
             )
             return True
 
+        # 统计口径用“截断前的全量消息”：总消息数、参与人数、最活跃时段、统计范围保持一致。
+        # 统计完立刻释放全量列表，后续 LLM 调用期间只保留真正要送模的 messages。
+        all_messages = messages
+        start_time = all_messages[0]['timestamp'] if all_messages else 0
+        end_time = all_messages[-1]['timestamp'] if all_messages else 0
+        participants_count = len(set(m['user_id'] for m in all_messages))
+        peak_hour = self._calculate_peak_hour(all_messages)
+        del all_messages
+
         truncated = False
         if total_msgs > self.max_messages_per_analysis:
             messages = messages[-self.max_messages_per_analysis:]
             truncated = True
 
-        start_time = messages[0]['timestamp'] if messages else 0
-        end_time = messages[-1]['timestamp'] if messages else 0
+        bot_info = await self._get_bot_info(*self._adapter_for_group(group_id))
+        bot_self_id = bot_info.get("self_id", "")
 
-        prompt = await self._build_analysis_prompt(messages, truncated)
+        prompt = await self._build_analysis_prompt(messages, truncated, bot_self_id=bot_self_id)
         result = await self._call_llm(prompt)
         if not result:
             await self._send_text_to_group(group_id, "❌ LLM 分析失败，请重试")
@@ -1742,7 +1893,7 @@ class KiraDailyReport(BasePlugin):
         for q in quotes:
             sender = q.get('sender', '')
             _, uid = parse_user_tag(sender)
-            if uid and uid == self._bot_self_id:
+            if uid and uid == bot_self_id:
                 continue
             filtered_quotes.append(q)
         result['quotes'] = filtered_quotes
@@ -1751,13 +1902,13 @@ class KiraDailyReport(BasePlugin):
             best = result['best_quote']
             sender = best.get('sender', '')
             _, uid = parse_user_tag(sender)
-            if uid and uid == self._bot_self_id:
+            if uid and uid == bot_self_id:
                 result['best_quote'] = None
 
         stats = result.get('stats', {})
         stats['total_messages'] = total_msgs
-        stats['participants'] = len(set(m['user_id'] for m in messages))
-        stats['peak_hour'] = self._calculate_peak_hour(messages)
+        stats['participants'] = participants_count
+        stats['peak_hour'] = peak_hour
         result['stats'] = stats
 
         result.setdefault('header_comment', '今日群聊，热闹非凡！')
@@ -1772,7 +1923,8 @@ class KiraDailyReport(BasePlugin):
 
         report_path = await self._generate_report(
             group_id, result, messages, truncated, start_time, end_time,
-            is_incremental=False
+            is_incremental=False,
+            bot_info=bot_info
         )
         await self._send_report(group_id, report_path)
         self._update_cooldown(group_id)
@@ -1790,8 +1942,15 @@ class KiraDailyReport(BasePlugin):
         truncated: bool,
         start_time: int,
         end_time: int,
-        is_incremental: bool = False
+        is_incremental: bool = False,
+        bot_info: Optional[Dict[str, str]] = None,
     ) -> Path:
+        if bot_info is None:
+            bot_info = await self._get_bot_info(*self._adapter_for_group(group_id))
+        bot_self_id = bot_info.get("self_id", "0")
+        bot_nickname = bot_info.get("nickname") or self._bot_nickname or "AI"
+        bot_avatar = bot_info.get("avatar") or self._bot_avatar or ""
+
         group_name = await self._get_group_name(group_id)
         group_avatar = await self.avatar_cache.get_group_avatar(group_id)
 
@@ -1821,7 +1980,7 @@ class KiraDailyReport(BasePlugin):
             name_tag = user.get('name', '')
             display_name, uid = parse_user_tag(name_tag)
             if uid and uid.isdigit():
-                if uid == self._bot_self_id:
+                if uid == bot_self_id:
                     continue
                 avatar = await self.avatar_cache.get_user_avatar(uid)
                 user_avatars[name_tag] = avatar
@@ -1833,7 +1992,7 @@ class KiraDailyReport(BasePlugin):
                     "display_name": display_name or name_tag
                 }
             else:
-                avatar = await self.avatar_cache.get_user_avatar(name_tag) if name_tag.isdigit() else self._bot_avatar
+                avatar = await self.avatar_cache.get_user_avatar(name_tag) if name_tag.isdigit() else bot_avatar
                 user_avatars[name_tag] = avatar
                 border_color = random.choice(border_colors_list)
                 color = shuffled_colors[idx % len(shuffled_colors)]
@@ -1847,7 +2006,7 @@ class KiraDailyReport(BasePlugin):
         for user in active_users:
             name_tag = user.get('name', '')
             _, uid = parse_user_tag(name_tag)
-            if uid and uid == self._bot_self_id:
+            if uid and uid == bot_self_id:
                 continue
             filtered_active_users.append(user)
         analysis_result['active_users'] = filtered_active_users
@@ -1856,7 +2015,7 @@ class KiraDailyReport(BasePlugin):
             sender_tag = quote.get('sender', '')
             _, uid = parse_user_tag(sender_tag)
             if uid and uid.isdigit() and sender_tag not in user_avatars:
-                if uid == self._bot_self_id:
+                if uid == bot_self_id:
                     continue
                 avatar = await self.avatar_cache.get_user_avatar(uid)
                 user_avatars[sender_tag] = avatar
@@ -1871,7 +2030,7 @@ class KiraDailyReport(BasePlugin):
             sender_tag = analysis_result['best_quote'].get('sender', '')
             _, uid = parse_user_tag(sender_tag)
             if uid and uid.isdigit() and sender_tag not in user_avatars:
-                if uid == self._bot_self_id:
+                if uid == bot_self_id:
                     analysis_result['best_quote'] = None
                 else:
                     avatar = await self.avatar_cache.get_user_avatar(uid)
@@ -1883,9 +2042,6 @@ class KiraDailyReport(BasePlugin):
                             "name_color": random.choice(WARM_COLORS),
                             "display_name": display_name or sender_tag
                         }
-
-        if not self._bot_avatar:
-            await self._fetch_bot_info()
 
         stats = analysis_result.get('stats', {})
 
@@ -1901,9 +2057,13 @@ class KiraDailyReport(BasePlugin):
             else:
                 stats['is_truncated'] = False
 
-        stats['start_time'] = datetime.fromtimestamp(start_time).strftime('%m-%d %H:%M') if start_time > 0 else "未知"
-        stats['end_time'] = datetime.fromtimestamp(end_time).strftime('%m-%d %H:%M') if end_time > 0 else "未知"
+        stats['start_time'] = self._dt(start_time).strftime('%m-%d %H:%M') if start_time > 0 else "未知"
+        stats['end_time'] = self._dt(end_time).strftime('%m-%d %H:%M') if end_time > 0 else "未知"
         analysis_result['stats'] = stats
+
+        # 报告日期跟随“分析窗口结束时间”，而不是任务实际完成时间：
+        # 定时任务跨过午夜完成、或手动补生成时，日期不会跳成第二天。
+        report_time = self._dt(end_time) if end_time > 0 else self._now()
 
         html = self.renderer.render_template(
             theme=self.theme,
@@ -1917,9 +2077,10 @@ class KiraDailyReport(BasePlugin):
             analysis=analysis_result,
             user_avatars=user_avatars,
             user_styles=user_styles,
-            bot_avatar=self._bot_avatar or '',
-            bot_nickname=self._bot_nickname or 'AI',
-            generate_time=datetime.now(),
+            bot_avatar=bot_avatar or '',
+            bot_nickname=bot_nickname or 'AI',
+            generate_time=self._now(),
+            report_time=report_time,
             topic_min=self.topic_min,
             topic_max=self.topic_max,
             quote_max=self.quote_max,
@@ -2001,7 +2162,7 @@ class KiraDailyReport(BasePlugin):
     # ============================================================
 
     async def _send_report(self, group_id: str, report_path: Path):
-        adapter, _adapter_name = self._resolve_adapter()
+        adapter, _adapter_name = self._adapter_for_group(group_id)
         if not adapter:
             logger.error(
                 "[KiraDaily] 未找到可用的 QQ 适配器，无法发送日报"
@@ -2028,7 +2189,7 @@ class KiraDailyReport(BasePlugin):
     async def _scheduler_loop(self):
         while self._running:
             try:
-                now = datetime.now()
+                now = self._now()
                 target_time = datetime.strptime(self.auto_analysis_time, "%H:%M")
                 target_datetime = now.replace(hour=target_time.hour, minute=target_time.minute, second=0, microsecond=0)
                 if target_datetime <= now:
@@ -2098,10 +2259,18 @@ class KiraDailyReport(BasePlugin):
                 groups = await self.db.get_all_groups()
         if not groups:
             return
-        tasks = []
-        for group_id in groups:
-            tasks.append(self._do_incremental_analysis(group_id))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        async def _run_one(gid: str):
+            if gid in self._running_groups:
+                self._log(f"增量分析跳过：群 {gid} 已有任务在跑")
+                return True
+            self._running_groups.add(gid)
+            try:
+                async with self._semaphore:
+                    return await self._do_incremental_analysis(gid)
+            finally:
+                self._running_groups.discard(gid)
+
+        results = await asyncio.gather(*[_run_one(g) for g in groups], return_exceptions=True)
         success_count = sum(1 for r in results if r is True)
         self._log(f"增量分析完成: {success_count}/{len(groups)} 群成功")
 
@@ -2116,46 +2285,63 @@ class KiraDailyReport(BasePlugin):
         text = "".join(elem.text for elem in event.message.chain if isinstance(elem, Text)).strip()
         if text not in self.command_prefixes:
             return
+
+        # 命令消息不进入 chat 的 buffer：在第一个 await 之前就 stop。
+        # 否则 chat 的防抖会先把 "/日报" 刷进 batch，bot 可能先回一句“好的”。
+        event.stop()
+
         group_id = self._get_group_id_from_event(event)
         if not group_id:
             await self.ctx.send_message_chain(
                 session=self._get_sid(event),
                 chain=MessageChain([Text(self.msg_not_group)])
             )
-            event.discard(force=True)
-            event.stop()
             return
         if not self._is_group_enabled(group_id):
             await self.ctx.send_message_chain(
                 session=self._get_sid(event),
                 chain=MessageChain([Text(self.msg_not_enabled)])
             )
-            event.discard(force=True)
-            event.stop()
             return
         user_id = self._get_user_id_from_event(event)
+        if group_id in self._running_groups:
+            await self.ctx.send_message_chain(
+                session=self._get_sid(event),
+                chain=MessageChain([Text(self.msg_processing)])
+            )
+            return
         if self._is_in_cooldown(group_id, user_id):
             remaining = self.cooldown_hours - (time.time() - self._cooldown_map.get(group_id, 0)) / 3600
             if remaining < 0:
                 remaining = 0
             await self._send_text_to_group(group_id, self.msg_cooldown.format(remaining=remaining))
-            event.discard(force=True)
-            event.stop()
             return
+
         await self.ctx.send_message_chain(
             session=self._get_sid(event),
             chain=MessageChain([Text(self.msg_processing)])
         )
 
-        # 只有增量群才走增量流程
-        if self._is_incremental_group(group_id):
-            await self._do_incremental_analysis(group_id)
-            await self._do_analysis(group_id, user_id)
-        else:
-            await self._do_full_analysis(group_id, user_id)
+        sid = self._get_sid(event)
+        if sid in self._gen_tasks and not self._gen_tasks[sid].done():
+            return
 
-        event.discard(force=True)
-        event.stop()
+        async def _run():
+            try:
+                await self._do_analysis(group_id, user_id)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[KiraDaily] 后台命令生成日报失败")
+
+        task = asyncio.create_task(_run())
+        self._gen_tasks[sid] = task
+
+        def _cleanup(t, _sid=sid):
+            if self._gen_tasks.get(_sid) is t:
+                self._gen_tasks.pop(_sid, None)
+
+        task.add_done_callback(_cleanup)
 
     # ============================================================
     # LLM 工具（自然语言触发）
@@ -2203,23 +2389,21 @@ class KiraDailyReport(BasePlugin):
             return "✅ 冷却中，已向用户说明。"
         sid = self._get_sid(event)
 
-        # 同一会话已有生成任务在跑 → 不重复触发
+        # 同一会话/同一群已有生成任务在跑 → 不重复触发
         if sid in self._gen_tasks and not self._gen_tasks[sid].done():
+            return "⏳ 该群日报正在生成中，完成后会自动发送，请告知用户稍候，不要重复请求。"
+        if group_id in self._running_groups:
             return "⏳ 该群日报正在生成中，完成后会自动发送，请告知用户稍候，不要重复请求。"
 
         async def _run():
             try:
                 group_key = group_id.replace(":", "_")
                 before = self._report_files()
-                # 只有增量群才走增量流程；全量分支显式传 days，避免多群并发竞争实例属性
-                if self._is_incremental_group(group_id):
-                    await self._do_incremental_analysis(group_id)
-                    await self._do_analysis(group_id, user_id)
-                else:
-                    await self._do_full_analysis(group_id, user_id, days)
+                # 统一入口：并发去重、信号量、冷却、增量/全量分支都在 _do_analysis 内
+                await self._do_analysis(group_id, user_id, days)
                 # 报告文件名含群ID+时间戳，每次生成必为新文件：按本群前缀判断是否真正生成
                 new_files = [f for f in (self._report_files() - before)
-                             if f.startswith(group_key)]
+                             if f.startswith(f"{group_key}_")]
                 if new_files:
                     await self._publish_notice(
                         sid,
