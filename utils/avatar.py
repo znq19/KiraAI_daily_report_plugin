@@ -20,6 +20,16 @@ class AvatarCache:
         self.expire_days = expire_days
         self.expire_seconds = expire_days * 86400 if expire_days > 0 else 0
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # 同一张头像并发下载/读取时串行化，避免半写文件被另一个日报读到
+        self._locks: dict = {}
+
+    def _lock_for(self, key: str, avatar_type: str):
+        lock_key = f"{avatar_type}:{key}"
+        lock = self._locks.get(lock_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[lock_key] = lock
+        return lock
 
     async def init(self):
         """初始化"""
@@ -73,6 +83,10 @@ class AvatarCache:
         return None
 
     async def _get_avatar(self, key: str, url_template: str, avatar_type: str, force_refresh: bool = False) -> str:
+        async with self._lock_for(key, avatar_type):
+            return await self._get_avatar_locked(key, url_template, avatar_type, force_refresh)
+
+    async def _get_avatar_locked(self, key: str, url_template: str, avatar_type: str, force_refresh: bool = False) -> str:
         """通用获取头像方法，支持过期检查"""
         cache_path = self._get_cache_path(key, avatar_type)
 
